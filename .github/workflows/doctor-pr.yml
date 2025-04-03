@@ -1,0 +1,16 @@
+name: Doctor PR
+on:
+  workflow_dispatch:
+    inputs:
+      action_input:
+        required: true
+        type: string
+jobs:
+  doctor-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Doctor PR
+        uses: Doctor-PR/action@dev
+        with:
+          action_input: ${{inputs.action_input}}
+          anthropic_api_key: ${{secrets.ANTHROPIC_API_KEY}}
