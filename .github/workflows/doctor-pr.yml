@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Doctor PR
-        uses: Doctor-PR/action@dev
+        uses: Doctor-PR/action@latest
         with:
           action_input: ${{inputs.action_input}}
           anthropic_api_key: ${{secrets.ANTHROPIC_API_KEY}}
