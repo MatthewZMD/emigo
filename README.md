@@ -31,6 +31,7 @@ Please use only for testing and development. Report issues - your feedback helps
     ```emacs-lisp
     (use-package emigo
       :straight (:host github :repo "MatthewZMD/emigo")
+      :autoload emigo-read-file-content
       :config
       (emigo-enable) ;; Starts the background process automatically
       :custom
