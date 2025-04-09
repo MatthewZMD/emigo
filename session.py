@@ -78,6 +78,8 @@ class Session:
         Returns (success: bool, message: str).
         """
         try:
+            # Expand user directory)
+            filename = os.path.expanduser(filename)          
             # Ensure filename is relative to session_path for consistency
             rel_filename = os.path.relpath(filename, self.session_path)
             # Check if file exists and is within session path
