@@ -87,7 +87,7 @@ class Session:
 
             if not os.path.isfile(abs_path):
                  return False, f"File not found: {rel_filename}"
-            if not abs_path.startswith(self.session_path):
+            if not abs_path.startswith(os.path.abspath(self.session_path)):
                  return False, f"File is outside session directory: {rel_filename}"
 
             # Add to context if not already present
