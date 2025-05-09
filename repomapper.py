@@ -890,18 +890,19 @@ class RepoMapper:
         # Initialize map generation timestamp
         self.map_generation_time = time.time()
 
-    def _is_gitignored(self, path):
-        """Check if path matches any .gitignore rules."""
+    def _parse_gitignore(self):
         try:
             from gitignore_parser import parse_gitignore
-            gitignore_path = os.path.join(self.root, '.gitignore')
-            if os.path.exists(gitignore_path):
-                gitignore = parse_gitignore(gitignore_path)
-                return gitignore(path)
         except ImportError:
             if self.verbose:
                 print("Note: gitignore_parser not installed, .gitignore checking disabled", file=sys.stderr)
-        return False
+            return None
+        gitignore_path = os.path.join(self.root, '.gitignore')
+        if not os.path.exists(gitignore_path):
+            return None
+
+        print(f"Using {gitignore_path}")
+        return parse_gitignore(gitignore_path)
 
     def _find_src_files(self, directory):
         """Finds all files in a directory recursively, excluding binaries."""
@@ -914,6 +915,7 @@ class RepoMapper:
             return []
 
         src_files = []
+        gitignore = self._parse_gitignore()
         if self.verbose:
             print(f"Scanning directory: {directory}", file=sys.stderr)
         for root, dirs, files in os.walk(directory, topdown=True):
@@ -935,7 +937,7 @@ class RepoMapper:
                 if (
                     ext in BINARY_EXTS or
                     file.startswith('.') or     # hidden files
-                    self._is_gitignored(file_path)  # gitignored files
+                    (gitignore is not None and gitignore(file_path))  # gitignored files
                 ):
                     continue
 
