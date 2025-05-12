@@ -30,7 +30,7 @@ The project is at its early-stage. Expect frequent breaking changes and unstable
 
     ```emacs-lisp
     (use-package emigo
-      :straight (:host github :repo "MatthewZMD/emigo")
+      :straight (:host github :repo "MatthewZMD/emigo" :files (:defaults "*.py" "*.el"))
       :config
       (emigo-enable) ;; Starts the background process automatically
       :custom
