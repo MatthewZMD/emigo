@@ -1,5 +1,5 @@
 from typing import List, Dict, Any, Optional
-from ..bridge.server import emacs_client
+from ..bridge.client import emacs_client
 
 def list_buffers() -> List[str]:
     """Return a list of all buffer names in Emacs."""

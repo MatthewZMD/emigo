@@ -2,7 +2,7 @@ from ..intent.schema import Intent
 from ..intent.registry import deserialize_intent
 from ..intent.validate import validate_intent_schema
 from ..intent.plan_io import summarize_intent
-from ..bridge.server import emacs_client
+from ..bridge.client import emacs_client
 from ..storage.db import storage_manager
 
 def execute_intent(intent_data: dict) -> dict:
@@ -17,7 +17,7 @@ def execute_intent(intent_data: dict) -> dict:
 
     # 3. Get a human-readable summary and prepare data for Emacs
     summary = summarize_intent(intent)
-    emacs_client.call_async('message', f"[Emigo] Executing: {summary}")
+    emacs_client.call_sync('message', f"[Emigo] Executing: {summary}")
 
     intent_as_dict = intent.to_dict()
     intent_as_dict['summary'] = summary # Add summary for trace log

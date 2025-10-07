@@ -1,3 +1,4 @@
 .emigo*
 /__pycache__/
 .aider*
+*__pycache__

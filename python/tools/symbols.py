@@ -1,6 +1,6 @@
 from typing import List, Dict, Any, Optional
 
-from ..bridge.server import emacs_client
+from ..bridge.client import emacs_client
 from ..storage.db import storage_manager
 
 def search_symbols(query: str, kind: Optional[str] = None, package: Optional[str] = None) -> List[Dict[str, Any]]:

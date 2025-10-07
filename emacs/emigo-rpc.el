@@ -11,11 +11,23 @@
 (defvar emigo--rpc-server-manager nil
   "The EPC manager for the server that Python connects TO (Emacs as server).")
 
+(defun emigo--first-start (port)
+  "Connect to the python server on PORT and create a manager for the connection."
+  (unless emigo--connection
+    (let* ((conn (emigo-epc-connect "localhost" port))
+           ;; Create a manager object to wrap the connection, which is
+           ;; required by emigo-epc-call-sync and emigo-epc-manager-send.
+           (manager (make-emigo-epc-manager :port port :connection conn)))
+      (emigo-epc-init-epc-layer manager)
+      (setq emigo--connection manager)
+      (message "Emigo connected on port %d." port))))
+
 (defun emigo--rpc-on-connect (manager)
   "Callback when Python agent connects to our EPC server."
   (message "Emigo agent has connected to Emacs EPC server.")
   ;; Generic
-  (emigo-epc-define-method manager 'message #'message "Show MESSAGE in the echo area.")
+  (emigo-epc-define-method manager 'emigo-message #'message "Show MESSAGE in the echo area.")
+  (emigo-epc-define-method manager 'emigo--first-start #'emigo--first-start "Handle first start signal from Python.")
   ;; Actuator
   (emigo-epc-define-method manager 'emigo-execute-intent #'emigo-execute-intent "Execute a semantic INTENT.")
   (emigo-epc-define-method manager 'emigo-undo-intent #'emigo-undo-intent "Undo an INTENT by ID.")
@@ -43,21 +55,18 @@
 (defun emigo--rpc-start-server ()
   "Start the Emacs-side EPC server for the agent to connect to.
 Return the port number."
-  (unless emigo--rpc-server-manager
+  ;; Based on legacy-emigo.el, emigo-epc-server-start returns a process.
+  ;; The variable emigo--rpc-server-manager will hold this process.
+  (unless (and emigo--rpc-server-manager (process-live-p emigo--rpc-server-manager))
     (setq emigo--rpc-server-manager (emigo-epc-server-start #'emigo--rpc-on-connect)))
-  (process-contact (epc-manager-server-process emigo--rpc-server-manager) :port))
+  (unless (and emigo--rpc-server-manager (process-live-p emigo--rpc-server-manager))
+    (error "[Emigo] Failed to start Emacs EPC server."))
+  (process-contact emigo--rpc-server-manager :service))
 
 (defun emigo--rpc-process-filter (proc string)
-  "Filter for the agent process output. Connects when port is received."
+  "Filter for the agent process output."
   (with-current-buffer (process-buffer proc)
-    (insert string))
-  (when (and (not emigo--connection)
-             (string-match "Starting Emigo Python agent server on port \\([0-9]+\\)" string))
-    (let ((port (string-to-number (match-string 1 string))))
-      (setq emigo--connection (emigo-epc-connect "localhost" port))
-      (message "Emigo connected on port %d." port)
-      ;; After connection, just let output go to buffer.
-      (set-process-filter proc (process-buffer proc)))))
+    (insert string)))
 
 (defun emigo--rpc-process-sentinel (proc msg)
   "Sentinel for the agent process."
@@ -71,13 +80,14 @@ Return the port number."
     (user-error "Emigo agent process is already running."))
   (let* ((emacs-server-port (emigo--rpc-start-server))
          (root-dir (file-name-directory (file-name-directory (locate-library "emigo-rpc.el"))))
-         (script-path (expand-file-name "python/bridge/server.py" root-dir))
-         (proc-buffer (get-buffer-create "*Emigo Process*")))
+         (proc-buffer (get-buffer-create "*Emigo Process*"))
+         ;; Run python from the project root so module imports work.
+         (default-directory root-dir))
     (setq emigo--process
           (start-process "emigo-agent"
                          proc-buffer
                          "python3"
-                         script-path
+                         "-m" "python.bridge.server"
                          (number-to-string emacs-server-port)))
     (set-process-filter emigo--process #'emigo--rpc-process-filter)
     (set-process-sentinel emigo--process #'emigo--rpc-process-sentinel)))
@@ -89,9 +99,9 @@ Return the port number."
   (let* ((request `((id . ,(emigo-epc-uid))
                     (type . "call")
                     (method . ,method)
-                    (params . ,params)))
+                    (params . ,(apply #'list params))))
          ;; The remote method `handle_request` takes one argument, the JSON string.
-         (response (emigo-epc-call-sync emigo--connection 'handle_request (list (json-serialize request)))))
+         (response (emigo-epc-call-sync emigo--connection 'handle_request (json-serialize request))))
     ;; The response is a plist converted from the Python dictionary by EPC.
     (if (plist-get response :ok)
         (plist-get response :result)
@@ -103,12 +113,13 @@ Return the port number."
 (defun emigo-rpc-notify (method &rest params)
   "Send an asynchronous RPC notification to the Python agent."
   (when emigo--connection
-    (let ((request `((id . ,(emigo-epc-uid))
-                     (type . "call")
-                     (method . ,method)
-                     (params . ,params))))
-      ;; The remote method `handle_request` takes one argument, the JSON string.
-      (emigo-epc-manager-send emigo--connection 'handle_request (json-serialize request)))))
+    (let* ((request-json (json-serialize
+                          `(:id ,(emigo-epc-uid)
+                            :type "call"
+                            :method ,method
+                            :params ,(vconcat params))))  ; vconcat creates a vector from the list
+           (args-list (list request-json)))
+      (emigo-epc-call-deferred emigo--connection 'handle_request args-list))))
 
 (provide 'emigo-rpc)
 

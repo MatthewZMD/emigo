@@ -20,7 +20,7 @@ class LLMClient:
                  model_name: Optional[str] = None,
                  api_key: Optional[str] = None,
                  base_url: Optional[str] = None):
-        self.model_name = model_name or os.environ.get("EMIGO_MODEL") or "gpt-4o"
+        self.model_name = model_name or os.environ.get("EMIGO_MODEL") or "gpt-5"
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self.base_url = base_url or os.environ.get("OPENAI_API_BASE")
 

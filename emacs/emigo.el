@@ -31,6 +31,7 @@
 (require 'subr-x)
 (require 'vc-git)
 (require 'emigo-epc)
+(require 'emigo-rpc)
 
 (defgroup emigo nil
   "Emigo group."
@@ -53,30 +54,6 @@
 (defcustom emigo-config-location (expand-file-name (locate-user-emacs-file "emigo/"))
   "Directory where emigo will store configuration files."
   :type 'directory)
-
-(defvar emigo-server nil
-  "The Emigo Server.")
-
-(defvar emigo-server-port nil)
-
-(defun emigo--start-epc-server ()
-  "Function to start the EPC server."
-  (unless (process-live-p emigo-server)
-    (setq emigo-server
-          (emigo-epc-server-start
-           (lambda (mngr)
-             (emigo-epc-define-method mngr 'eval-in-emacs 'emigo--eval-in-emacs-func)
-             (emigo-epc-define-method mngr 'get-emacs-var 'emigo--get-emacs-var-func)
-             (emigo-epc-define-method mngr 'get-emacs-vars 'emigo--get-emacs-vars-func)
-             (emigo-epc-define-method mngr 'get-user-emacs-directory 'emigo--user-emacs-directory)
-             (emigo-epc-define-method mngr 'file-written-externally 'emigo--file-written-externally)
-             (emigo-epc-define-method mngr 'agent-finished 'emigo--agent-finished)
-             (emigo-epc-define-method mngr 'flush-buffer 'emigo--flush-buffer '((session-path string) (content string) (role string)))
-             (emigo-epc-define-method mngr 'yes-or-no-p 'yes-or-no-p))))
-    (if emigo-server
-        (setq emigo-server-port (process-contact emigo-server :service))
-      (error "[Emigo] emigo-server failed to start")))
-  emigo-server)
 
 (defun emigo--eval-in-emacs-func (sexp-string)
   (eval (read sexp-string))
@@ -164,16 +141,6 @@ Searches parent directories for existing sessions."
 (defvar-local emigo-chat-file-info nil
   "String displaying info about files in chat context (e.g., '3 files [1234 tokens]').")
 
-(defvar emigo-epc-process nil)
-
-(defvar emigo-internal-process nil)
-(defvar emigo-internal-process-prog nil)
-(defvar emigo-internal-process-args nil)
-
-(defcustom emigo-name "*emigo*"
-  "Name of Emigo buffer."
-  :type 'string)
-
 (defcustom emigo-python-command (if (memq system-type '(cygwin windows-nt ms-dos)) "python.exe" "python3")
   "The Python interpreter used to run the Emigo agent."
   :type 'string)
@@ -206,125 +173,18 @@ Then Emigo will start by gdb, please send new issue with `emigo-name' buffer con
     (error "[Emigo] Could not determine session path"))
   session-path)
 
-(defun emigo-call-async (method &rest args)
-  "Call Python EPC function METHOD and ARGS asynchronously."
-  (if (emigo-epc-live-p emigo-epc-process)
-      (emigo-deferred-chain
-        ;; Pass args as a list directly
-        (emigo-epc-call-deferred emigo-epc-process (read method) args))
-    ;; If process not live, queue the first call details
-    (setq emigo-first-call-method method)
-    (setq emigo-first-call-args args) ;; Store args as a list
-    (message "[Emigo] Process not started, queuing call: %s" method)
-    (emigo-start-process)))
-
-(defun emigo-call--sync (method &rest args)
-  "Call Python EPC function METHOD and ARGS synchronously."
-  (if (emigo-epc-live-p emigo-epc-process)
-      ;; Pass args as a list directly
-      (emigo-epc-call-sync emigo-epc-process (read method) args)
-    (message "[Emigo] Process not started.")
-    nil))
-
-(defvar emigo-first-call-method nil)
-(defvar emigo-first-call-args nil)
-
 (defun emigo-restart-process ()
   "Stop and restart Emigo process."
   (interactive)
-  (emigo-kill-process)
-  (emigo-start-process)
+  (when (and emigo--process (process-live-p emigo--process))
+    (kill-process emigo--process))
+  (setq emigo--process nil)
+  (setq emigo--connection nil)
+  (emigo-rpc-connect)
   (message "[Emigo] Process restarted."))
 
-(defun emigo-start-process ()
-  "Start Emigo process if it isn't started."
-  (if (emigo-epc-live-p emigo-epc-process)
-      (remove-hook 'post-command-hook #'emigo-start-process)
-    ;; start epc server and set `emigo-server-port'
-    (emigo--start-epc-server)
-    (let* ((emigo-args (append
-                        (list "-m" "python.bridge.server")
-                        (list (number-to-string emigo-server-port))
-                        (when emigo-enable-profile
-                          (list "profile"))
-                        )))
-
-      ;; Set process parameters.
-      (if emigo-enable-debug
-          (progn
-            (setq emigo-internal-process-prog "gdb")
-            (setq emigo-internal-process-args (append (list "-batch" "-ex" "run" "-ex" "bt" "--args" emigo-python-command) emigo-args)))
-        (setq emigo-internal-process-prog emigo-python-command)
-        (setq emigo-internal-process-args emigo-args))
-
-      ;; Start python process from the project root so "python." is a valid package.
-      (let ((process-connection-type t)
-            (default-directory (emigo-project-root)))
-        (setq emigo-internal-process
-              (apply 'start-process
-                     emigo-name emigo-name
-                     emigo-internal-process-prog emigo-internal-process-args)))
-      (set-process-query-on-exit-flag emigo-internal-process nil))))
-
-(defvar emigo-stop-process-hook nil)
-
-(defun emigo-kill-process ()
-  "Stop Emigo process and kill all Emigo buffers."
-  (interactive)
-  ;; Kill project buffers.
-  (save-excursion
-    (cl-dolist (buffer emigo-project-buffers)
-      (when (and buffer (buffer-live-p buffer))
-        (kill-buffer buffer))))
-  (setq emigo-project-buffers nil)
-
-  ;; Close dedicated window and cancel timer.
-  (emigo-close)
-  (emigo--cancel-dedicated-window-timer)
-
-  ;; Run stop process hooks.
-  (run-hooks 'emigo-stop-process-hook)
-
-  ;; Kill process after kill buffer, make application can save session data.
-  (emigo--kill-python-process))
-
-(add-hook 'kill-emacs-hook #'emigo-kill-process)
-
-(defun emigo--kill-python-process ()
-  "Kill Emigo background python process."
-  (when (emigo-epc-live-p emigo-epc-process)
-    ;; Cleanup before exit Emigo server process.
-    (emigo-call-async "cleanup")
-    ;; Delete Emigo server process.
-    (emigo-epc-stop-epc emigo-epc-process)
-    (when (get-buffer emigo-name)
-      (kill-buffer emigo-name))
-    (setq emigo-epc-process nil)
-    (message "[Emigo] Process terminated.")))
-
-(defun emigo--first-start (emigo-epc-port)
-  "Call `emigo--open-internal' upon receiving `start_finish' signal from server."
-  ;; Make EPC process.
-  (setq emigo-epc-process (make-emigo-epc-manager
-                           :server-process emigo-internal-process
-                           :commands (cons emigo-internal-process-prog emigo-internal-process-args)
-                           :title (mapconcat 'identity (cons emigo-internal-process-prog emigo-internal-process-args) " ")
-                           :port emigo-epc-port
-                           :connection (emigo-epc-connect "127.0.0.1" emigo-epc-port)
-                           ))
-  (emigo-epc-init-epc-layer emigo-epc-process)
-
-  (when (and emigo-first-call-method emigo-first-call-args)
-    ;; If first call details exist, execute the deferred call
-    (emigo-deferred-chain
-      (emigo-epc-call-deferred emigo-epc-process
-                               (read emigo-first-call-method) ;; Method name
-                               emigo-first-call-args) ;; Pass the stored args list
-      (setq emigo-first-call-method nil)
-      (setq emigo-first-call-args nil))))
-
 (defun emigo-enable ()
-  (add-hook 'post-command-hook #'emigo-start-process))
+  (add-hook 'post-command-hook #'emigo-rpc-connect))
 
 (defun emigo-update-header-line (session-path)
   (setq header-line-format (concat
@@ -380,9 +240,9 @@ as the session path."
                            (file-truename (emigo-project-root))))
            (buffer-name (emigo-get-buffer-name nil session-path))
            (buffer (get-buffer-create buffer-name)))
-      ;; Ensure EPC process is running or starting
-      (unless (emigo-epc-live-p emigo-epc-process)
-        (emigo-start-process))
+      ;; Ensure RPC process is running or starting
+      (unless (and emigo--process (process-live-p emigo--process))
+        (emigo-rpc-connect))
 
       ;; Set buffer-local session path variable
       (with-current-buffer buffer
@@ -648,28 +508,32 @@ If on a prompt line:
             (kill-region (point) (line-end-position))))))))
 
 (defun emigo-send-prompt ()
-  "Send the current prompt to the AI."
+  "Send the current prompt to the AI planner."
   (interactive)
-  ;; Clear the LLM output accumulator for the new interaction
   (setq-local emigo--llm-output "")
   (let ((prompt (save-excursion
                   (goto-char (point-max))
                   (search-backward-regexp (concat "^" emigo-prompt-symbol) nil t)
                   (forward-char (length emigo-prompt-symbol))
-                  (string-trim (buffer-substring-no-properties (point) (point-max)))
-                  )))
+                  (string-trim (buffer-substring-no-properties (point) (point-max))))))
     (if (string-empty-p prompt)
         (ding)
-      ;; Add prompt after the initial "" (at index 1)
+      ;; Add prompt to history
       (setcdr emigo--prompt-history (cons prompt (cdr emigo--prompt-history)))
-      ;; Reset index to 0 (pointing to the empty string)
       (setq emigo-prompt-history-index 0)
-      ;; Send prompt
-      (goto-char (point-max)) ;; Go to end before searching back
+
+      ;; Clear the prompt from the buffer
+      (goto-char (point-max))
       (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
         (forward-char (length emigo-prompt-symbol))
         (delete-region (point) (point-max)))
-      (emigo-call-async "emigo_send" emigo-session-path prompt))))
+
+      ;; Display user prompt in buffer
+      (let ((inhibit-read-only t))
+        (insert (propertize (format "\n\nUser: %s\n\n" prompt) 'face 'font-lock-keyword-face)))
+
+      ;; Send to planner
+      (emigo-rpc-notify "start_planner" emigo-session-path prompt))))
 
 (defun emigo--flush-buffer (session-path content &optional role)
   "Flush CONTENT to the Emigo buffer associated with SESSION-PATH.
@@ -767,57 +631,14 @@ Skip the dedicated Emigo window when cycling."
 
 
 (defun emigo-add-file-to-context ()
-  "Interactively add a file to the current project's Emigo chat context.
-The file path is relative to the session directory."
+  "Interactively add a file to the current project's Emigo chat context."
   (interactive)
-  (unless (emigo-epc-live-p emigo-epc-process)
-    (message "[Emigo] Process not running.")
-    (emigo-start-process)            ; Attempt to start if not running
-    (error "Emigo process was not running, please try again shortly."))
-
-  (let ((buffer (emigo-get-buffer-name t)))
-    (unless buffer
-      (error "[Emigo] No Emigo buffer found"))
-
-    (with-current-buffer buffer
-      (unless emigo-session-path
-        (error "[Emigo] Could not determine session path from buffer"))
-
-      (let* ((default-directory emigo-session-path)
-             (file-to-add (read-file-name "Add file to context: " default-directory)))
-        (when file-to-add
-          (emigo-call-async "add_file_to_context" emigo-session-path file-to-add))))))
+  (user-error "This feature is not implemented in the current backend."))
 
 (defun emigo-drop-file-from-context ()
   "Remove a file from the current project's Emigo chat context."
   (interactive)
-  (cl-block emigo-drop-file-from-context
-    (condition-case err
-        (progn
-          (unless (emigo-epc-live-p emigo-epc-process)
-            (message "[Emigo] Process not running.")
-            (emigo-start-process)            ; Attempt to start if not running
-            (error "Emigo process was not running, please try again shortly."))
-
-          (let ((buffer (emigo-get-buffer-name t)))
-            (unless buffer
-              (error "[Emigo] No Emigo buffer found"))
-
-            (with-current-buffer buffer
-              (unless emigo-session-path
-                (error "[Emigo] Could not determine session path from buffer"))
-
-              (let ((chat-files (emigo-call--sync "get_chat_files" emigo-session-path)))
-                (unless chat-files
-                  (message "[Emigo] No files currently in chat context for session: %s" emigo-session-path)
-                  (cl-return-from emigo-drop-file-from-context nil))
-
-                (let ((file-to-remove (completing-read "Remove file from context: " chat-files nil t)))
-                  (when (and file-to-remove (member file-to-remove chat-files))
-                    (emigo-call-async "remove_file_from_context" emigo-session-path file-to-remove)))))))
-      (error
-       (message "[Emigo] Error in drop-file-from-context: %s" (error-message-string err))
-       nil))))
+  (user-error "This feature is not implemented in the current backend."))
 
 (defun emigo--file-written-externally (abs-path)
   "Inform Emacs that the file at ABS-PATH was modified externally.
@@ -860,214 +681,34 @@ Preserves the prompt history for convenience."
           (message "Local buffer cleared for session: %s" session-path))))))
 
 (defun emigo-clear-history ()
-  "Clear the chat history (both remote LLM and local buffer) for the current Emigo session.
-Preserves the prompt history for convenience."
+  "Clear the chat history for the current Emigo session."
   (interactive)
-  (unless (emigo-epc-live-p emigo-epc-process)
-    (message "[Emigo] Process not running.")
-    (emigo-start-process)            ; Attempt to start if not running
-    (error "Emigo process was not running, please try again shortly."))
-
-  (let ((buffer (emigo-get-buffer-name t)))
-    (unless buffer
-      (error "[Emigo] No Emigo buffer found"))
-
-    (with-current-buffer buffer
-      (unless emigo-session-path
-        (error "[Emigo] Could not determine session path from buffer"))
-
-      ;; Save current prompt history before clearing
-      (let ((saved-prompt-history emigo--prompt-history))
-        ;; Call Python side to clear LLM history and trigger local buffer clear
-        (if (emigo-call--sync "clear_history" emigo-session-path)
-            (progn
-              ;; Restore the prompt history after clearing
-              (setq-local emigo--prompt-history saved-prompt-history)
-              (message "Cleared history for session: %s" emigo-session-path))
-          (message "Failed to clear history for session: %s" emigo-session-path))))))
+  (user-error "This feature is not implemented in the current backend."))
 
 (defun emigo-show-history ()
   "Display the chat history for the current Emigo session in a new Org buffer."
   (interactive)
-  (unless (emigo--is-emigo-buffer-p)
-    (error "Not in an Emigo buffer"))
-
-  (let* ((history-buffer-name (format "*emigo-history:%s*" emigo-session-path))
-         (buf (get-buffer-create history-buffer-name))
-         (session-path emigo-session-path)
-         (history (emigo-call--sync "get_history" emigo-session-path)))
-
-    ;; Check if history is a list (basic validation)
-    (unless (or history (listp history))
-      (message "Received invalid history format from Python for session: %s" emigo-session-path)
-      (when (get-buffer buf) (kill-buffer buf))
-      (cl-return-from emigo-show-history))
-
-    (with-current-buffer buf
-      (let ((inhibit-read-only t)) ;; Allow modification during setup
-        (erase-buffer)) ;; Erase first
-      ;; Set modes *after* erasing and outside inhibit-read-only
-      (org-mode)
-      (setq buffer-read-only nil) ;; Make buffer writable
-      (display-line-numbers-mode 1)
-      ;; Store original session path for resending
-      (setq-local emigo-session-path session-path)
-      ;; Keybindings for the history buffer
-      (local-set-key (kbd "q") (lambda () (interactive) (kill-this-buffer)))
-      (local-set-key (kbd "C-c C-c") #'emigo-send-revised-history) ; New binding
-
-      ;; Re-enable inhibit-read-only just for insertion if needed, though likely not necessary now
-      (let ((inhibit-read-only t))
-        ;; Keybindings for the history buffer
-        (local-set-key (kbd "q") (lambda () (interactive) (kill-this-buffer)))
-        (local-set-key (kbd "C-c C-c") #'emigo-send-revised-history) ; New binding
-
-        ;; Iterate through history (list of (timestamp plist) lists from Python)
-        (dolist (entry history)
-          (let* ((timestamp-float (car entry)) ;; Timestamp is the first element
-                 (message-plist (cadr entry)) ;; Message plist is the second element
-                 (role (or (plist-get message-plist :role) "unknown"))
-                 (content (or (plist-get message-plist :content) ""))
-                 ;; Format the float timestamp
-                 (timestamp-str (format-time-string "%F %T" timestamp-float)))
-            ;; Insert Org heading for role/timestamp and source block for content
-            (insert (format "* [%s] %s\n#+BEGIN_SRC %s\n%s\n#+END_SRC\n\n"
-                            timestamp-str ;; Use the formatted timestamp string
-                            (capitalize role) ;; Capitalize role (User, Assistant)
-                            (if (equal role "user") "text" "markdown") ;; Basic language hint
-                            (string-trim content)))))))
-    (switch-to-buffer-other-window buf)))
-
-(defun emigo--parse-history-buffer ()
-  "Parse the current Org-mode history buffer into a list of message plists.
-Returns a list suitable for sending back to Python: '((:role \"user\" :content \"...\") ...)."
-  (unless (string-match-p "^\\*emigo-history:.*\\*$" (buffer-name))
-    (error "Not in an Emigo history buffer"))
-  (save-excursion
-    (goto-char (point-min))
-    (let ((history-list '()))
-      (while (re-search-forward "^\\* \\[.*\\] \\(.*?\\)$" nil t)
-        (let* ((role-str (downcase (match-string 1))) ;; user, assistant, tool, etc.
-               (content-start (save-excursion
-                                (forward-line 1)
-                                (if (looking-at "#\\+BEGIN_SRC")
-                                    (progn
-                                      (forward-line 1)
-                                      (point))
-                                  (point))))
-               (content-end (save-excursion
-                              (goto-char content-start)
-                              (if (re-search-forward "#\\+END_SRC" nil t)
-                                  (match-beginning 0)
-                                (point-max))))
-               (content (if (and content-start content-end (> content-end content-start))
-                            (buffer-substring-no-properties content-start content-end)
-                          "")))
-          (push `(:role ,role-str :content ,(string-trim content)) history-list)))
-      (if (null history-list)
-          (progn
-            (message "[Emigo] No history entries found in buffer")
-            nil)
-        (nreverse history-list)))))
-
-(defun emigo--convert-plist-to-alist (plist-list)
-  "Convert Elisp list of plists '((:key val ...)...) to list of alists for EPC/JSON."
-  (mapcar (lambda (plist)
-            (let ((alist '()))
-              (while plist
-                (let ((key (symbol-name (pop plist))) ;; Convert symbol key to string
-                      (val (pop plist)))
-                  ;; Prepend to build the alist
-                  (push (cons key val) alist)))
-              ;; Reverse to maintain original order (optional but often preferred)
-              (nreverse alist)))
-          plist-list))
+  (user-error "This feature is not implemented in the current backend."))
 
 (defun emigo-send-revised-history ()
   "Parse the current history buffer and send it to start a new interaction."
   (interactive)
-  (unless (string-match-p "^\\*emigo-history:.*\\*$" (buffer-name))
-    (error "Not in an Emigo history buffer"))
-  (unless (emigo-epc-live-p emigo-epc-process)
-    (message "[Emigo] Process not running.")
-    (emigo-start-process)
-    (error "Emigo process was not running, please try again shortly."))
-  (unless emigo-session-path
-    (error "[Emigo] Could not determine original session path from history buffer"))
-
-  (let ((revised-history (emigo--parse-history-buffer)))
-    (if (null revised-history)
-        (message "[Emigo] History buffer is empty or could not be parsed.")
-      (progn
-        ;; Validate: Check if the last message is from the user
-        (let* ((last-message-plist (car (last revised-history)))
-               (last-role (plist-get last-message-plist :role)))
-          (unless (equal last-role "user")
-            (error "[Emigo] The last entry in the history buffer must be a user prompt"))
-
-          ;; Split into history and the final user prompt
-          (let* ((new-history-plists (butlast revised-history))
-                 (user-prompt-plist last-message-plist)
-                 ;; Convert to JSON-compatible formats (list of alists, single alist)
-                 (new-history-alists (emigo--convert-plist-to-alist new-history-plists)) ;; USE ALIST
-                 (user-prompt-alist (car (emigo--convert-plist-to-alist (list user-prompt-plist))))) ;; USE ALIST
-
-            (message "[Emigo] Setting history and sending new prompt: %s" user-prompt-alist) ;; Log the alist
-            ;; Call the new Python EPC method
-            (emigo-call-async "set_history_and_send"
-                              emigo-session-path
-                              new-history-alists ;; Pass list of alists
-                              user-prompt-alist))) ;; Pass single alist
-
-        ;; Optionally switch back to the main emigo buffer automatically
-        (let ((main-buffer-name (format "*emigo:%s*" emigo-session-path)))
-          (when (get-buffer main-buffer-name)
-            (switch-to-buffer-other-window main-buffer-name)))))))
+  (user-error "This feature is not implemented in the current backend."))
 
 (defun emigo-stop-call ()
   "Cancel the currently running LLM interaction for this session."
   (interactive)
-  (unless (emigo--is-emigo-buffer-p)
-    (error "Not in an Emigo buffer"))
-  (unless (emigo-epc-live-p emigo-epc-process)
-    (message "[Emigo] Process not running.")
-    (emigo-start-process)
-    (error "Emigo process was not running, please try again shortly."))
-
-  (unless emigo-session-path
-    (error "[Emigo] Could not determine session path from buffer"))
-
-  (message "[Emigo] Requesting cancellation for session: %s" emigo-session-path)
-  ;; Call the new Python EPC method asynchronously
-  (emigo-call-async "cancel_llm_interaction" emigo-session-path))
+  (user-error "This feature is not implemented in the current backend."))
 
 (defun emigo-ls-files-in-context ()
   "List the files currently in the Emigo chat context for the current project."
   (interactive)
-  (unless (emigo-epc-live-p emigo-epc-process)
-    (message "[Emigo] Process not running.")
-    (emigo-start-process)            ; Attempt to start if not running
-    (error "Emigo process was not running, please try again shortly."))
-
-  (let ((buffer (emigo-get-buffer-name t)))
-    (unless buffer
-      (error "[Emigo] No Emigo buffer found"))
-
-    (with-current-buffer buffer
-      (unless emigo-session-path
-        (error "[Emigo] Could not determine session path from buffer"))
-
-      (let ((chat-files (emigo-call--sync "get_chat_files" emigo-session-path)))
-        (if chat-files
-            (message "[Emigo] Files added in session %s: %s"
-                     emigo-session-path
-                     (mapconcat #'identity chat-files ", "))
-          (message "[Emigo] No files currently in chat context for session: %s" emigo-session-path))))))
+  (user-error "This feature is not implemented in the current backend."))
 
 (defun emigo-show-proc-buffer ()
-  "Open and switch to the Emigo process buffer `emigo-name'."
+  "Open and switch to the Emigo process buffer."
   (interactive)
-  (let ((buf (get-buffer emigo-name)))
+  (let ((buf (get-buffer "*Emigo Process*")))
     (if buf
         (switch-to-buffer-other-window buf)
       (message "No Emigo process buffer found"))))

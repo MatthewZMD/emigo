@@ -5,7 +5,7 @@ import jsonschema
 from .schema import Intent
 
 # Load the schema once
-SCHEMA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "schemas")
+SCHEMA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "schemas")
 INTENT_SCHEMA_PATH = os.path.join(SCHEMA_DIR, "intents.json")
 
 with open(INTENT_SCHEMA_PATH, "r") as f:

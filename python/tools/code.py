@@ -2,7 +2,7 @@ from typing import Optional
 from ..rir import codec
 from ..rir.nodes import Node
 from ..intent.schema import TargetSelector
-from ..bridge.server import emacs_client
+from ..bridge.client import emacs_client
 
 def read_sexps(target: dict) -> Optional[Node]:
     """
