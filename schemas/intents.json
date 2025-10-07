@@ -1,0 +1,147 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Emigo Intent",
+  "description": "A semantic action to be performed by the Emigo agent.",
+  "type": "object",
+  "properties": {
+    "type": {
+      "description": "The type of the intent.",
+      "type": "string",
+      "enum": [
+        "AddArgument",
+        "WrapWith",
+        "AddDefcustom",
+        "AddKeybinding",
+        "InsertAdvice",
+        "AddDocstring",
+        "RenameSymbol",
+        "ReplaceSexp"
+      ]
+    },
+    "target_selector": {
+      "description": "A selector to identify the target buffer, file, or S-expression.",
+      "type": "object",
+      "properties": {
+        "file_path": { "type": "string" },
+        "buffer_name": { "type": "string" },
+        "defun_name": { "type": "string" }
+      }
+    },
+    "params": {
+      "description": "Parameters specific to the intent type.",
+      "type": "object"
+    },
+    "safety_class": {
+      "description": "The safety classification of the intent.",
+      "type": "string",
+      "enum": ["safe", "requires_approval", "dangerous"],
+      "default": "safe"
+    },
+    "inverse_type": {
+      "description": "The type of the intent that would reverse this one.",
+      "type": "string"
+    },
+    "intent_id": {
+        "type": "string",
+        "format": "uuid"
+    }
+  },
+  "required": ["type", "target_selector", "params"],
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "AddArgument" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "properties": { "arg_name": { "type": "string" } },
+            "required": ["arg_name"]
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "WrapWith" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "properties": { "wrapper_form": { "type": "string" } },
+            "required": ["wrapper_form"]
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "AddDefcustom" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "properties": { "name": { "type": "string" } },
+            "required": ["name"]
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "AddKeybinding" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "properties": {
+              "key": { "type": "string" },
+              "command_name": { "type": "string" }
+            },
+            "required": ["key", "command_name"]
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "AddDocstring" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "properties": {
+              "docstring": { "type": "string" },
+              "symbol_name": { "type": "string" }
+            },
+            "required": ["docstring", "symbol_name"]
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "RenameSymbol" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "properties": {
+              "old_name": { "type": "string" },
+              "new_name": { "type": "string" }
+            },
+            "required": ["old_name", "new_name"]
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "ReplaceSexp" } } },
+      "then": {
+        "properties": {
+          "params": {
+            "type": "object",
+            "properties": {
+              "new_sexp_string": { "type": "string" }
+            },
+            "required": ["new_sexp_string"]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -57,10 +57,6 @@
 (defvar emigo-server nil
   "The Emigo Server.")
 
-(defvar emigo-python-file (expand-file-name "emigo.py" (if load-file-name
-                                                           (file-name-directory load-file-name)
-                                                         default-directory)))
-
 (defvar emigo-server-port nil)
 
 (defun emigo--start-epc-server ()
@@ -179,7 +175,7 @@ Searches parent directories for existing sessions."
   :type 'string)
 
 (defcustom emigo-python-command (if (memq system-type '(cygwin windows-nt ms-dos)) "python.exe" "python3")
-  "The Python interpreter used to run emigo.py."
+  "The Python interpreter used to run the Emigo agent."
   :type 'string)
 
 (defcustom emigo-enable-debug nil
@@ -247,7 +243,7 @@ Then Emigo will start by gdb, please send new issue with `emigo-name' buffer con
     ;; start epc server and set `emigo-server-port'
     (emigo--start-epc-server)
     (let* ((emigo-args (append
-                        (list emigo-python-file)
+                        (list "-m" "python.bridge.server")
                         (list (number-to-string emigo-server-port))
                         (when emigo-enable-profile
                           (list "profile"))
@@ -261,8 +257,9 @@ Then Emigo will start by gdb, please send new issue with `emigo-name' buffer con
         (setq emigo-internal-process-prog emigo-python-command)
         (setq emigo-internal-process-args emigo-args))
 
-      ;; Start python process.
-      (let ((process-connection-type t))
+      ;; Start python process from the project root so "python." is a valid package.
+      (let ((process-connection-type t)
+            (default-directory (emigo-project-root)))
         (setq emigo-internal-process
               (apply 'start-process
                      emigo-name emigo-name
