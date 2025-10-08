@@ -2,7 +2,6 @@
 
 (require 'emigo-epc)
 (require 'json)
-(require 'emigo-actuator)
 
 (declare-function emigo-get-buffer-name "emigo")
 (declare-function emigo-lock-region "emigo")
@@ -94,6 +93,47 @@ ROLE indicates the type of content (e.g., 'user', 'llm', 'error')."
           (unless (looking-back (concat "\n" (regexp-quote emigo-prompt-symbol) " *$") nil)
             (insert (propertize (concat "\n\n" emigo-prompt-symbol) 'face font-lock-keyword-face))))))))
 
+(defun emigo-apropos (regexp)
+  "Return a list of symbols and their documentation matching REGEXP.
+This is a wrapper around `apropos-symbols' that returns structured data."
+  (let* ((symbols (apropos-symbols (if (string-prefix-p "'" regexp) (substring regexp 1) regexp)))
+         (results '()))
+    (dolist (s symbols)
+      (let* ((kind (cond
+                    ((commandp s) "command")
+                    ((macrop s) "macro")
+                    ((fboundp s) "function")
+                    ((facep s) "face")
+                    ((custom-variable-p s) "variable")
+                    ((boundp s) "variable")
+                    (t "symbol")))
+             (doc (documentation s))
+             (doc-excerpt (when doc (substring doc 0 (min 200 (length doc))))))
+        (push `(:symbol ,(symbol-name s)
+                :kind ,kind
+                :doc_excerpt ,doc-excerpt)
+              results)))
+    (nreverse results)))
+
+(defun emigo-list-buffers ()
+  "Return a list of all buffer names."
+  (mapcar #'buffer-name (buffer-list)))
+
+(defun emigo-buffer-metadata (buffer-name)
+  "Return a plist of metadata for BUFFER-NAME."
+  (let ((buf (get-buffer buffer-name)))
+    (when buf
+      (with-current-buffer buf
+        `(:name ,(buffer-name)
+          :file ,(buffer-file-name)
+          :mode ,(symbol-name major-mode)
+          :size ,(buffer-size)
+          :modified ,(buffer-modified-p))))))
+
+(defun emigo-current-mode ()
+  "Return the major-mode of the current buffer."
+  (symbol-name major-mode))
+
 (defun emigo--register-ui-rpc-methods (manager)
   "Register Emigo UI-related RPC methods."
   (emigo-epc-define-method manager 'emigo--flush-buffer #'emigo--flush-buffer "Flush content to an Emigo buffer.")
@@ -107,26 +147,11 @@ ROLE indicates the type of content (e.g., 'user', 'llm', 'error')."
   (emigo-epc-define-method manager 'emigo--eval-in-emacs-func #'emigo--eval-in-emacs-func "Evaluate an elisp string.")
   (emigo-epc-define-method manager 'emigo--first-start #'emigo--first-start "Handle first start signal from Python.")
   (emigo-epc-define-method manager 'emigo--get-emacs-vars-func #'emigo--get-emacs-vars-func "Get values of multiple Emacs variables.")
-  ;; Actuator
-  (emigo-epc-define-method manager 'emigo-execute-intent #'emigo-execute-intent "Execute a semantic INTENT.")
-  (emigo-epc-define-method manager 'emigo-undo-intent #'emigo-undo-intent "Undo an INTENT by ID.")
-  ;; Indexer/Symbols
-  (emigo-epc-define-method manager 'emigo-index-build #'emigo-index-build "Trigger a full rebuild of the symbol index.")
+
+  ;; Symbol/State Reading
+  (emigo-epc-define-method manager 'emigo-apropos #'emigo-apropos "Search for symbols matching REGEXP.")
   (emigo-epc-define-method manager 'emacs_symbol_doc (lambda (s) (when-let ((sym (intern-soft s))) (documentation sym))) "Return the full docstring for a SYMBOL name.")
-  (emigo-epc-define-method manager 'emacs_symbol_source
-    (lambda (s)
-      (when-let ((sym (intern-soft s)))
-        (let ((file (ignore-errors (find-lisp-object-file sym))))
-          (when file
-            (let ((pos (ignore-errors (find-lisp-object-file sym file))))
-              (list :file file
-                    :line (when pos
-                            (with-current-buffer (find-file-noselect file)
-                              (line-number-at-pos pos)))))))))
-    "Return a plist with :file and :line for a SYMBOL name.")
   (emigo-epc-define-method manager 'emacs_keybindings (lambda (s) (when-let ((sym (intern-soft s))) (let ((raw-keys (where-is-internal sym nil nil t))) (mapcar #'key-description raw-keys)))) "Return a list of keybindings for a SYMBOL name.")
-  ;; Code/State Reading
-  (emigo-epc-define-method manager 'emigo-read-sexps #'emigo-read-sexps "Read s-expression from target and return as string.")
   (emigo-epc-define-method manager 'emigo-list-buffers #'emigo-list-buffers "Return a list of buffer names.")
   (emigo-epc-define-method manager 'emigo-buffer-metadata #'emigo-buffer-metadata "Return metadata for a buffer.")
   (emigo-epc-define-method manager 'emigo-current-mode #'emigo-current-mode "Return the current major mode.")
@@ -169,7 +194,7 @@ Return the port number."
           (start-process "emigo-agent"
                          proc-buffer
                          "python3"
-                         "-m" "python.bridge.server"
+                         "-m" "python.server"
                          (number-to-string emacs-server-port)))
     (set-process-filter emigo--process #'emigo--rpc-process-filter)
     (set-process-sentinel emigo--process #'emigo--rpc-process-sentinel)))

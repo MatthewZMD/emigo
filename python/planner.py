@@ -1,10 +1,9 @@
 import inspect
 import json
 import sys
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 
-from ..bridge import client as bridge_client
-from ..intent.validate import IntentValidationError
+from epc.client import EPCClient
 from .llm import llm_client
 
 try:
@@ -12,34 +11,89 @@ try:
 except ImportError:
     litellm = None
 
+# Global client to communicate back to Emacs.
+# Initialized by server.py at startup.
+emacs_client: Optional[EPCClient] = None
+
+
+# --- Tool Implementations ---
+
+def apropos(query: str) -> List[Dict[str, Any]]:
+    """
+    Search for symbols in Emacs matching a query (apropos).
+    """
+    return emacs_client.call('emigo-apropos', [query])
+
+def read_doc(symbol_name: str) -> Optional[str]:
+    """Read the full docstring for a symbol from Emacs."""
+    return emacs_client.call('emacs_symbol_doc', [symbol_name])
+
+def find_keybindings(symbol_name: str) -> List[str]:
+    """Find keybindings for a given command symbol in Emacs."""
+    return emacs_client.call('emacs_keybindings', [symbol_name])
+
+def list_buffers() -> List[str]:
+    """Return a list of all buffer names in Emacs."""
+    return emacs_client.call('emigo-list-buffers', [])
+
+def buffer_metadata(buffer_name: str) -> Optional[Dict[str, Any]]:
+    """Return metadata for a specific buffer."""
+    return emacs_client.call('emigo-buffer-metadata', [buffer_name])
+
+def current_mode() -> Optional[str]:
+    """Return the major-mode of the current buffer in Emacs."""
+    return emacs_client.call('emigo-current-mode', [])
+
+def select_target(file_path: Optional[str] = None, buffer_name: Optional[str] = None, defun_name: Optional[str] = None) -> dict:
+    """Construct a target selector dictionary."""
+    # Filter out None values
+    return {k: v for k, v in {
+        "file_path": file_path,
+        "buffer_name": buffer_name,
+        "defun_name": defun_name
+    }.items() if v is not None}
+
+
+# --- Tool and Method Registries ---
+
+# Tools available to the LLM planner.
+LLM_TOOLS: Dict[str, Callable[..., Any]] = {
+    "apropos": apropos,
+    "read_doc": read_doc,
+    "find_keybindings": find_keybindings,
+    "list_buffers": list_buffers,
+    "buffer_metadata": buffer_metadata,
+    "current_mode": current_mode,
+}
+
+# The registry of all functions callable via RPC from Emacs.
+# This will be populated after all functions are defined.
+RPC_METHODS: Dict[str, Callable[..., Any]] = {**LLM_TOOLS}
+RPC_METHODS['select_target'] = select_target
+
+
+# --- Planner and Session Management ---
+
 SYSTEM_PROMPT = """You are Emigo, an expert software developer integrated into Emacs.
 You are an Emacs-native agent. Your primary goal is to help users with software development tasks inside Emacs.
-You can understand and manipulate Emacs Lisp code through structured "Intents".
 You can interact with the user's Emacs environment by calling provided tools.
-You can read files, search for symbols, and understand the user's current context within Emacs.
+You can search for symbols using apropos, read documentation, and understand the user's current context within Emacs.
 
 Your workflow is:
 1.  **Perceive**: Understand the user's goal and the current state of their Emacs environment.
-2.  **Plan**: Formulate a sequence of tool calls to achieve the goal.
-3.  **Execute**: The host environment will execute your plan. You will observe the results and continue planning until the goal is met.
+2.  **Plan**: Formulate a sequence of tool calls to achieve the goal. You can also ask clarifying questions or provide code snippets for the user to execute.
+3.  **Execute**: The host environment will execute your tool calls. You will observe the results and continue planning until the goal is met.
 
 You must only use the tools provided to you. Do not ask for confirmation unless the task is ambiguous.
-When asked to write or modify code, you should use the `execute_intent` tool with `ReplaceSexp` or other appropriate intents. You do not output code blocks directly.
+If you need to write or modify code, provide the complete code snippet in a markdown block for the user to copy and paste.
 """
 
 def get_available_tools_schema() -> List[Dict[str, Any]]:
     """
     Generate an OpenAI-compatible tool schema for all registered tools.
     """
-    from ..bridge.registry import TOOL_REGISTRY
     schemas = []
-    # Exclude host-level control functions from the LLM's toolset
-    excluded_tools = {'start_planner', 'clear_history', 'get_history'}
-
-    for name, func in TOOL_REGISTRY.items():
-        if name in excluded_tools:
-            continue
-
+    for name, func in LLM_TOOLS.items():
         try:
             sig = inspect.signature(func)
             doc = inspect.getdoc(func) or "No description."
@@ -93,7 +147,7 @@ class PlannerAgent:
     def _configure_llm(self):
         """Fetches LLM configuration from Emacs."""
         try:
-            config_vars = bridge_client.emacs_client.call_sync(
+            config_vars = emacs_client.call_sync(
                 'emigo--get-emacs-vars-func',
                 ['emigo-model', 'emigo-base-url', 'emigo-api-key']
             )
@@ -104,7 +158,7 @@ class PlannerAgent:
             if not all([llm_client.model_name, llm_client.base_url, llm_client.api_key]):
                  raise ValueError("LLM config is incomplete. Check emigo-model, emigo-base-url, and emigo-api-key.")
         except Exception as e:
-            bridge_client.emacs_client.call_sync('emigo-message', [f"[Emigo] Error getting LLM config: {e}"])
+            emacs_client.call_sync('emigo-message', [f"[Emigo] Error getting LLM config: {e}"])
             raise
 
     def clear_history(self):
@@ -119,22 +173,22 @@ class PlannerAgent:
     def run(self, prompt: str):
         """Runs the main ReAct loop for one user turn."""
         if not litellm:
-            bridge_client.emacs_client.call_sync('emigo-message', ["[Emigo] Error: litellom is not installed."])
+            emacs_client.call_sync('emigo-message', ["[Emigo] Error: litellom is not installed."])
             return
 
         self.history.append({"role": "user", "content": prompt})
-        bridge_client.emacs_client.call_sync('emigo--flush-buffer', [self.session_path, "\n\nAssistant:\n", "llm"])
+        emacs_client.call_sync('emigo--flush-buffer', [self.session_path, "\n\nAssistant:\n", "llm"])
 
         while True:
             try:
                 response_stream = llm_client.generate_plan(self.history, get_available_tools_schema())
             except litellm.exceptions.RateLimitError as e:
                 error_msg = f"LLM Rate Limit Error: {e}"
-                bridge_client.emacs_client.call_sync('emigo-message', [f"[Emigo] Error: {error_msg}"])
+                emacs_client.call_sync('emigo-message', [f"[Emigo] Error: {error_msg}"])
                 break
             except Exception as e:
                 error_msg = f"LLM connection error: {e}"
-                bridge_client.emacs_client.call_sync('emigo-message', [f"[Emigo] Error: {error_msg}"])
+                emacs_client.call_sync('emigo-message', [f"[Emigo] Error: {error_msg}"])
                 break
 
             llm_content = ""
@@ -148,7 +202,7 @@ class PlannerAgent:
 
                 if delta.content:
                     llm_content += delta.content
-                    bridge_client.emacs_client.call_sync('emigo--flush-buffer', [self.session_path, delta.content, "llm"])
+                    emacs_client.call_sync('emigo--flush-buffer', [self.session_path, delta.content, "llm"])
 
                 if delta.tool_calls:
                     for tool_call_chunk in delta.tool_calls:
@@ -164,11 +218,10 @@ class PlannerAgent:
             assistant_message = {"role": "assistant", "content": llm_content}
             if tool_call_chunks:
                 assistant_message["tool_calls"] = list(tool_call_chunks.values())
-                bridge_client.emacs_client.call_sync('emigo--flush-buffer', [self.session_path, "\n", "llm"])
+                emacs_client.call_sync('emigo--flush-buffer', [self.session_path, "\n", "llm"])
             self.history.append(assistant_message)
 
             if stop_reason == "tool_calls":
-                from ..bridge.registry import TOOL_REGISTRY
                 tool_results = []
                 print(f"\n--- PROPOSED TOOL CALLS ---\n{json.dumps(assistant_message['tool_calls'], indent=2)}", file=sys.stderr)
                 for tool_call in assistant_message["tool_calls"]:
@@ -176,7 +229,7 @@ class PlannerAgent:
                     tool_id = tool_call["id"]
                     try:
                         tool_params = json.loads(tool_call["function"]["arguments"])
-                        tool_func = TOOL_REGISTRY.get(tool_name)
+                        tool_func = RPC_METHODS.get(tool_name)
                         if not tool_func:
                             raise NameError(f"Tool '{tool_name}' not found.")
 
@@ -186,7 +239,7 @@ class PlannerAgent:
                         print(f"--- TOOL RESULT (ID: {tool_id}) ---\n{result_content}", file=sys.stderr)
                         tool_results.append({"tool_call_id": tool_id, "role": "tool", "name": tool_name, "content": result_content})
 
-                    except (Exception, IntentValidationError, TypeError) as e:
+                    except (Exception, TypeError) as e:
                         print(f"Error executing tool '{tool_name}': {e}", file=sys.stderr)
                         error_content = json.dumps({"error": str(e)})
                         print(f"--- TOOL ERROR (ID: {tool_id}) ---\n{error_content}", file=sys.stderr)
@@ -197,7 +250,7 @@ class PlannerAgent:
             else: # end_turn, stop, etc.
                 break # Exit loop and wait for next user prompt
 
-        bridge_client.emacs_client.call_sync('emigo--reinsert-prompt', [self.session_path])
+        emacs_client.call_sync('emigo--reinsert-prompt', [self.session_path])
 
 
 # --- Session Management ---
@@ -221,7 +274,7 @@ def start_planner(session_path: str, prompt: str):
         print(f"Error in planner for session {session_path}: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc(file=sys.stderr)
-        bridge_client.emacs_client.call_sync('emigo--reinsert-prompt', [session_path])
+        emacs_client.call_sync('emigo--reinsert-prompt', [session_path])
         return {"status": "failure", "reason": str(e)}
 
 def clear_history(session_path: str):
@@ -237,3 +290,9 @@ def get_history(session_path: str) -> List[Dict[str, Any]]:
     if session_path in PLANNER_SESSIONS:
         return PLANNER_SESSIONS[session_path].get_history()
     return []
+
+
+# Add session management functions to the RPC method registry
+RPC_METHODS["start_planner"] = start_planner
+RPC_METHODS["clear_history"] = clear_history
+RPC_METHODS["get_history"] = get_history

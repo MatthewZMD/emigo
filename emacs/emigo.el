@@ -32,8 +32,6 @@
 (require 'vc-git)
 (require 'emigo-epc)
 (require 'emigo-rpc)
-(require 'emigo-index)
-(require 'emigo-trace)
 
 (defgroup emigo nil
   "Emigo agent settings."
@@ -86,24 +84,26 @@
      (unless (server-running-p)
        (server-start))))
 
-  (emigo-index-build)
-  (emigo-index-watch)
-
   (emigo-rpc-connect)
-  (message "Emigo session started. Python agent process is starting...")
-
-  ;; Open *Emigo* trace buffer.
-  (with-current-buffer (get-buffer-create emigo-trace-buffer-name)
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (insert (format "Emigo session trace started at %s.\n\n" (format-time-string "%Y-%m-%d %H:%M:%S")))))
-  (emigo-trace-open))
+  (message "Emigo session started. Python agent process is starting..."))
 
 ;;;###autoload
 (defun emigo-instruct (goal)
-  "Send a high-level GOAL to the Emigo planner."
+  "Send a high-level GOAL to the Emigo planner.
+This determines the project root, ensures the Emigo buffer is visible,
+inserts the GOAL as a prompt, and sends it."
   (interactive "MGoal: ")
-  (emigo-rpc-notify "start_planner" goal))
+  ;; Ensure the relevant emigo buffer is created and visible.
+  ;; This also switches to that buffer.
+  (emigo)
+  ;; Now, insert the goal into the prompt area and send it.
+  (let ((inhibit-read-only t))
+    (goto-char (point-max))
+    (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
+      (forward-char (length emigo-prompt-symbol))
+      (delete-region (point) (point-max))
+      (insert goal)))
+  (emigo-send-prompt))
 
 (defun emigo--is-emigo-buffer-p (&optional buffer)
   "Return non-nil if BUFFER (defaults to current) is an Emigo buffer."
