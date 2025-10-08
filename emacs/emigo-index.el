@@ -45,7 +45,6 @@
   (let ((symbols-batch '())
         (count 0)
         (batch-size 100)
-        (obarray (copy-sequence obarray)) ; Work on a copy
         (features-by-file (make-hash-table :test 'equal)))
     (dolist (item load-history)
       (when (stringp (car item))

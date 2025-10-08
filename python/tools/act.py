@@ -2,7 +2,7 @@ from ..intent.schema import Intent
 from ..intent.registry import deserialize_intent
 from ..intent.validate import validate_intent_schema
 from ..intent.plan_io import summarize_intent
-from ..bridge.client import emacs_client
+from ..bridge import client as bridge_client
 from ..storage.db import storage_manager
 
 def execute_intent(intent_data: dict) -> dict:
@@ -17,13 +17,13 @@ def execute_intent(intent_data: dict) -> dict:
 
     # 3. Get a human-readable summary and prepare data for Emacs
     summary = summarize_intent(intent)
-    emacs_client.call_sync('message', f"[Emigo] Executing: {summary}")
+    bridge_client.emacs_client.call_sync('message', f"[Emigo] Executing: {summary}")
 
     intent_as_dict = intent.to_dict()
     intent_as_dict['summary'] = summary # Add summary for trace log
 
     # 4. Call the Emacs actuator to perform the action
-    result = emacs_client.call('emigo-execute-intent', intent_as_dict)
+    result = bridge_client.emacs_client.call('emigo-execute-intent', [intent_as_dict])
 
     # 5. On success, log the intent to the persistent journal
     if result and result.get('status') == 'success':
@@ -33,4 +33,4 @@ def execute_intent(intent_data: dict) -> dict:
 
 def undo_intent(intent_id: str) -> dict:
     """Calls Emacs to undo a previously executed intent."""
-    return emacs_client.call('emigo-undo-intent', intent_id)
+    return bridge_client.emacs_client.call('emigo-undo-intent', [intent_id])

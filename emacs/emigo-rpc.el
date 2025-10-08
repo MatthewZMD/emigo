@@ -4,6 +4,9 @@
 (require 'json)
 (require 'emigo-actuator)
 
+(declare-function emigo-get-buffer-name "emigo")
+(declare-function emigo-lock-region "emigo")
+
 (defvar emigo--process nil
   "The Emigo agent process.")
 (defvar emigo--connection nil
@@ -22,12 +25,88 @@
       (setq emigo--connection manager)
       (message "Emigo connected on port %d." port))))
 
+(defvar emigo-rpc-connect-hook nil
+  "Hook run after the agent connects. The EPC manager is passed as an argument.")
+
+(defun emigo--eval-in-emacs-func (sexp-string)
+  (eval (read sexp-string))
+  ;; Return nil to avoid epc error `Got too many parameters in the reply'.
+  nil)
+
+(defun emigo--get-emacs-var-func (var-name)
+  (let* ((var-symbol (intern var-name))
+         (var-value (symbol-value var-symbol))
+         ;; We need convert result of booleanp to string.
+         ;; Otherwise, python-epc will convert all `nil' to [] at Python side.
+         (var-is-bool (prin1-to-string (booleanp var-value))))
+    (list var-value var-is-bool)))
+
+(defun emigo--get-emacs-vars-func (&rest vars)
+  (mapcar #'emigo--get-emacs-var-func vars))
+
+(defun emigo--flush-buffer (session-path content &optional role)
+  "Flush CONTENT to the Emigo buffer associated with SESSION-PATH.
+ROLE indicates the type of content (e.g., 'user', 'llm', 'error')."
+  (let ((buffer (get-buffer (emigo-get-buffer-name t session-path)))) ;; Find existing buffer
+    (unless buffer
+      (warn "[Emigo] Could not find buffer for session %s to flush content: %s" session-path content)
+      (cl-return-from emigo--flush-buffer))
+
+    (with-current-buffer buffer
+      (save-excursion
+        (let ((inhibit-read-only t)) ;; Allow modification
+          ;; Go to the end of the buffer, just before the prompt.
+          (goto-char (point-max))
+          (when (search-backward-regexp (concat "\n\n" (regexp-quote emigo-prompt-symbol)) nil t)
+            (goto-char (match-beginning 0)))
+
+          ;; --- Insert new content based on role ---
+          (when content
+            (cond
+             ((equal role "user")
+              (insert (propertize content 'face font-lock-keyword-face)))
+
+             ((equal role "llm")
+              (setq-local emigo--llm-output (concat (or emigo--llm-output "") content))
+              ;; Remove leading whitespace from newlines to fix LLM formatting quirks.
+              (insert (replace-regexp-in-string "\n[ \t]+" "\n" content)))
+
+             ((equal role "error") ;; Handle error messages
+              (insert (propertize content 'face 'error)))
+
+             (t ;; Default case (e.g., if role is nil or unexpected)
+              (insert content))))
+
+          ;; --- Update read-only region ---
+          (goto-char (point-max))
+          (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
+            (forward-char (1- (length emigo-prompt-symbol)))
+            (emigo-lock-region (point-min) (point))))))))
+
+(defun emigo--reinsert-prompt (session-path)
+  "Re-insert the prompt in the Emigo buffer for SESSION-PATH."
+  (let ((buffer (get-buffer (emigo-get-buffer-name t session-path))))
+    (when buffer
+      (with-current-buffer buffer
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          ;; Avoid double prompts
+          (unless (looking-back (concat "\n" (regexp-quote emigo-prompt-symbol) " *$") nil)
+            (insert (propertize (concat "\n\n" emigo-prompt-symbol) 'face font-lock-keyword-face))))))))
+
+(defun emigo--register-ui-rpc-methods (manager)
+  "Register Emigo UI-related RPC methods."
+  (emigo-epc-define-method manager 'emigo--flush-buffer #'emigo--flush-buffer "Flush content to an Emigo buffer.")
+  (emigo-epc-define-method manager 'emigo--reinsert-prompt #'emigo--reinsert-prompt "Re-insert the prompt in an emigo buffer."))
+
 (defun emigo--rpc-on-connect (manager)
   "Callback when Python agent connects to our EPC server."
   (message "Emigo agent has connected to Emacs EPC server.")
   ;; Generic
   (emigo-epc-define-method manager 'emigo-message #'message "Show MESSAGE in the echo area.")
+  (emigo-epc-define-method manager 'emigo--eval-in-emacs-func #'emigo--eval-in-emacs-func "Evaluate an elisp string.")
   (emigo-epc-define-method manager 'emigo--first-start #'emigo--first-start "Handle first start signal from Python.")
+  (emigo-epc-define-method manager 'emigo--get-emacs-vars-func #'emigo--get-emacs-vars-func "Get values of multiple Emacs variables.")
   ;; Actuator
   (emigo-epc-define-method manager 'emigo-execute-intent #'emigo-execute-intent "Execute a semantic INTENT.")
   (emigo-epc-define-method manager 'emigo-undo-intent #'emigo-undo-intent "Undo an INTENT by ID.")
@@ -50,13 +129,16 @@
   (emigo-epc-define-method manager 'emigo-read-sexps #'emigo-read-sexps "Read s-expression from target and return as string.")
   (emigo-epc-define-method manager 'emigo-list-buffers #'emigo-list-buffers "Return a list of buffer names.")
   (emigo-epc-define-method manager 'emigo-buffer-metadata #'emigo-buffer-metadata "Return metadata for a buffer.")
-  (emigo-epc-define-method manager 'emigo-current-mode #'emigo-current-mode "Return the current major mode."))
+  (emigo-epc-define-method manager 'emigo-current-mode #'emigo-current-mode "Return the current major mode.")
+
+  ;; Register UI methods now that they are part of this file.
+  (emigo--register-ui-rpc-methods manager)
+
+  (run-hook-with-args 'emigo-rpc-connect-hook manager))
 
 (defun emigo--rpc-start-server ()
   "Start the Emacs-side EPC server for the agent to connect to.
 Return the port number."
-  ;; Based on legacy-emigo.el, emigo-epc-server-start returns a process.
-  ;; The variable emigo--rpc-server-manager will hold this process.
   (unless (and emigo--rpc-server-manager (process-live-p emigo--rpc-server-manager))
     (setq emigo--rpc-server-manager (emigo-epc-server-start #'emigo--rpc-on-connect)))
   (unless (and emigo--rpc-server-manager (process-live-p emigo--rpc-server-manager))
@@ -77,7 +159,7 @@ Return the port number."
 (defun emigo-rpc-connect ()
   "Start the Python agent process and connect to it."
   (when emigo--process
-    (user-error "Emigo agent process is already running."))
+    (message "Emigo agent process is already running."))
   (let* ((emacs-server-port (emigo--rpc-start-server))
          (root-dir (file-name-directory (file-name-directory (locate-library "emigo-rpc.el"))))
          (proc-buffer (get-buffer-create "*Emigo Process*"))

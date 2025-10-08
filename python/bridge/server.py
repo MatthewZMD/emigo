@@ -34,7 +34,6 @@ def main():
     Starts the EPC server, connects back to Emacs, and routes messages.
     """
     # Populate the tool registry with tools that would cause circular imports
-    TOOL_REGISTRY["start_planner"] = planner_loop.run_planner_loop
     TOOL_REGISTRY["notify_file_changed"] = notify_file_changed
 
     if len(sys.argv) < 2:

@@ -9,7 +9,7 @@
 ;; Copyright (C) 2025, Emigo, all rights reserved.
 ;; Created: 2025-03-29
 ;; Version: 0.5
-;; Last-Updated: Sat Apr 19 04:47:41 2025 (-0400)
+;; Last-Updated: Wed Oct  8 11:43:33 2025 (+0800)
 ;;           By: Mingde (Matthew) Zeng
 ;; Package-Requires: ((emacs "26.1") (transient "0.3.0") (compat "30.0.2.0") (markdown-mode "2.6"))
 ;; Keywords: ai emacs llm aider ai-pair-programming tools
@@ -32,44 +32,78 @@
 (require 'vc-git)
 (require 'emigo-epc)
 (require 'emigo-rpc)
+(require 'emigo-index)
+(require 'emigo-trace)
 
 (defgroup emigo nil
-  "Emigo group."
-  :group 'emigo)
+  "Emigo agent settings."
+  :group 'applications)
 
 (defcustom emigo-mode-hook '()
   "emigo mode hook."
   :type 'hook
   :group 'emigo)
 
-(defcustom emigo-model ""
+(defcustom emigo-model "openrouter/deepseek/deepseek-chat-v3.1"
   "Default AI model.")
 
-(defcustom emigo-base-url ""
+(defcustom emigo-base-url "https://openrouter.ai/api/v1"
   "Base URL for AI model.")
 
-(defcustom emigo-api-key ""
+(defcustom emigo-api-key (getenv "OPENROUTER_API_KEY")
   "API key for AI model.")
 
 (defcustom emigo-config-location (expand-file-name (locate-user-emacs-file "emigo/"))
   "Directory where emigo will store configuration files."
   :type 'directory)
 
-(defun emigo--eval-in-emacs-func (sexp-string)
-  (eval (read sexp-string))
-  ;; Return nil to avoid epc error `Got too many parameters in the reply'.
-  nil)
+(defcustom emigo-user-config-dir user-emacs-directory
+  "Path to the user's Emacs configuration root."
+  :type 'string
+  :group 'emigo)
 
-(defun emigo--get-emacs-var-func (var-name)
-  (let* ((var-symbol (intern var-name))
-         (var-value (symbol-value var-symbol))
-         ;; We need convert result of booleanp to string.
-         ;; Otherwise, python-epc will convert all `nil' to [] at Python side.
-         (var-is-bool (prin1-to-string (booleanp var-value))))
-    (list var-value var-is-bool)))
+(defcustom emigo-packages-dir (expand-file-name "elpa" user-emacs-directory)
+  "Path to the directory containing downloaded Emacs packages."
+  :type 'string
+  :group 'emigo)
 
-(defun emigo--get-emacs-vars-func (&rest vars)
-  (mapcar #'emigo--get-emacs-var-func vars))
+(defcustom emigo-server-policy 'spawn-if-missing
+  "Policy for connecting to the Emacs server.
+'attach-if-present: Connect to a running server, otherwise do nothing.
+'spawn-if-missing: Start a new server if one is not running."
+  :type '(choice (const attach-if-present) (const spawn-if-missing))
+  :group 'emigo)
+
+;;;###autoload
+(defun emigo-start-process ()
+  "Start or attach to an Emacs server and launch the Emigo agent."
+  (interactive)
+  (pcase emigo-server-policy
+    ('attach-if-present
+     (unless (server-running-p)
+       (user-error "Emacs server is not running and emigo-server-policy is 'attach-if-present")))
+    ('spawn-if-missing
+     (unless (server-running-p)
+       (server-start))))
+
+  (emigo-index-build)
+  (emigo-index-watch)
+
+  (emigo-rpc-connect)
+  (message "Emigo session started. Python agent process is starting...")
+
+  ;; Open *Emigo* trace buffer.
+  (with-current-buffer (get-buffer-create emigo-trace-buffer-name)
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert (format "Emigo session trace started at %s.\n\n" (format-time-string "%Y-%m-%d %H:%M:%S")))))
+  (emigo-trace-open))
+
+;;;###autoload
+(defun emigo-instruct (goal)
+  "Send a high-level GOAL to the Emigo planner."
+  (interactive "MGoal: ")
+  (emigo-rpc-notify "start_planner" goal))
 
 (defun emigo--is-emigo-buffer-p (&optional buffer)
   "Return non-nil if BUFFER (defaults to current) is an Emigo buffer."
@@ -522,56 +556,19 @@ If on a prompt line:
       (setcdr emigo--prompt-history (cons prompt (cdr emigo--prompt-history)))
       (setq emigo-prompt-history-index 0)
 
-      ;; Clear the prompt from the buffer
-      (goto-char (point-max))
-      (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
-        (forward-char (length emigo-prompt-symbol))
-        (delete-region (point) (point-max)))
-
-      ;; Display user prompt in buffer
+      ;; Clear the prompt from the buffer and display user prompt
       (let ((inhibit-read-only t))
-        (insert (propertize (format "\n\nUser: %s\n\n" prompt) 'face 'font-lock-keyword-face)))
+        (goto-char (point-max))
+        ;; The prompt is always inserted with two newlines before it.
+        (when (search-backward-regexp (concat "\n\n" (regexp-quote emigo-prompt-symbol)) nil t)
+          (delete-region (match-beginning 0) (point-max)))
+        (goto-char (point-max))
+        (insert (propertize (format "\n\nUser: %s" prompt) 'face 'font-lock-keyword-face)))
 
       ;; Send to planner
-      (emigo-rpc-notify "start_planner" emigo-session-path prompt))))
+      (emigo-rpc-notify "start_planner" emigo-session-path prompt)
+      (emigo--reinsert-prompt emigo-session-path))))
 
-(defun emigo--flush-buffer (session-path content &optional role)
-  "Flush CONTENT to the Emigo buffer associated with SESSION-PATH.
-ROLE indicates the type of content (e.g., 'user', 'llm', 'error')."
-  (let ((buffer (get-buffer (emigo-get-buffer-name t session-path)))) ;; Find existing buffer
-    (unless buffer
-      (warn "[Emigo] Could not find buffer for session %s to flush content: %s" session-path content)
-      (cl-return-from emigo--flush-buffer))
-
-    (with-current-buffer buffer
-      (save-excursion
-        (let ((inhibit-read-only t)) ;; Allow modification
-          ;; Go to the end of the buffer before the prompt
-          (goto-char (point-max))
-          (when (search-backward-regexp (concat "^" emigo-prompt-symbol) nil t)
-            (forward-line -2)
-            (goto-char (line-end-position)))
-
-          ;; --- Insert new content based on role ---
-          (cond
-           ((equal role "user")
-            (insert (propertize content 'face font-lock-keyword-face)))
-
-           ((equal role "llm")
-            (setq-local emigo--llm-output (concat emigo--llm-output content))
-            (insert content))
-
-           ((equal role "error") ;; Handle error messages
-            (insert (propertize content 'face 'error)))
-
-           (t ;; Default case (e.g., if role is nil or unexpected)
-            (insert content)))
-
-          ;; --- Update read-only region ---
-          (goto-char (point-max))
-          (when (search-backward-regexp (concat "^" (regexp-quote emigo-prompt-symbol)) nil t)
-            (forward-char (1- (length emigo-prompt-symbol)))
-            (emigo-lock-region (point-min) (point))))))))
 
 (defun emigo-lock-region (beg end)
   "Super-lock the region from BEG to END."
@@ -683,12 +680,40 @@ Preserves the prompt history for convenience."
 (defun emigo-clear-history ()
   "Clear the chat history for the current Emigo session."
   (interactive)
-  (user-error "This feature is not implemented in the current backend."))
+  (let ((session-path (emigo--ensure-session-path emigo-session-path)))
+    (emigo-rpc-notify "clear_history" session-path)
+    (emigo--clear-local-buffer session-path)
+    (message "Emigo history cleared for %s" session-path)))
 
 (defun emigo-show-history ()
   "Display the chat history for the current Emigo session in a new Org buffer."
   (interactive)
-  (user-error "This feature is not implemented in the current backend."))
+  (let* ((session-path (emigo--ensure-session-path emigo-session-path))
+         (history (emigo-rpc-call "get_history" session-path))
+         (history-buffer (get-buffer-create (format "*Emigo History: %s*" (file-name-nondirectory session-path)))))
+    (with-current-buffer history-buffer
+      (org-mode)
+      (erase-buffer)
+      (dolist (message history)
+        (let ((role (cdr (assoc 'role message)))
+              (content (cdr (assoc 'content message)))
+              (tool-calls (cdr (assoc 'tool_calls message))))
+          (insert (format "* %s\n" (upcase role)))
+          (when (stringp content)
+            (insert (format "#+begin_src text\n%s\n#+end_src\n\n" content)))
+          (when (listp tool-calls)
+            (dolist (tool-call tool-calls)
+              (let* ((function-info (cdr (assoc 'function tool-call)))
+                     (name (cdr (assoc 'name function-info)))
+                     (args (cdr (assoc 'arguments function-info))))
+                (insert (format "** TOOL CALL: %s\n" name))
+                (insert (format "#+begin_src json\n%s\n#+end_src\n\n"
+                                (json-encode-string args))))))
+          (when (and (equal role "tool") (cdr (assoc 'content message)))
+             (insert (format "#+begin_src json\n%s\n#+end_src\n\n"
+                             (cdr (assoc 'content message)))))))
+      (goto-char (point-min)))
+    (display-buffer history-buffer)))
 
 (defun emigo-send-revised-history ()
   "Parse the current history buffer and send it to start a new interaction."
