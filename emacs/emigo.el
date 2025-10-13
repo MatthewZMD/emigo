@@ -569,6 +569,35 @@ If on a prompt line:
       (emigo-rpc-notify "start_planner" emigo-session-path prompt)
       (emigo--reinsert-prompt emigo-session-path))))
 
+(defun emigo--approve-tool-calls (tool-calls-json)
+  "Display tool calls to the user and ask for approval.
+TOOL-CALLS-JSON is a JSON string representing a list of tool calls.
+Returns \"approve\" if the user agrees, or a string with a
+rejection reason/new prompt if they disagree."
+  (let* ((json-array-type 'list)
+         (tool-calls (json-read-from-string tool-calls-json))
+         (buffer (current-buffer))
+         (prompt-text "\n\n*Proposed Tool Calls:*\n")
+         (inhibit-read-only t))
+    (with-current-buffer buffer
+      (goto-char (point-max))
+      ;; Make sure we are not inside the prompt
+      (when (search-backward-regexp (concat "\n\n" (regexp-quote emigo-prompt-symbol)) nil t)
+        (goto-char (match-beginning 0)))
+      (insert (propertize prompt-text 'face 'font-lock-comment-face))
+      (dolist (tool-call tool-calls)
+        (let* ((function-info (cdr (assoc 'function tool-call)))
+               (name (cdr (assoc 'name function-info)))
+               (args-json (cdr (assoc 'arguments function-info)))
+               (args-str (let ((json-object-type 'plist))
+                           (format "%S" (json-read-from-string args-json)))))
+          (insert (propertize (format "\n- Call `%s` with arguments:\n" name) 'face 'font-lock-doc-face))
+          (insert (propertize (format "  %s\n" args-str) 'face 'font-lock-string-face)))))
+
+    (if (y-or-n-p "Approve tool calls? ")
+        "approve"
+      (read-from-minibuffer "Tool calls rejected. Enter new prompt or reason: "))))
+
 
 (defun emigo-lock-region (beg end)
   "Super-lock the region from BEG to END."

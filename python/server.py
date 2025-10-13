@@ -9,7 +9,7 @@ import json
 from epc.server import EPCServer
 from epc.client import EPCClient
 
-from . import planner
+from . import planner, tools
 
 
 def main():
@@ -22,7 +22,7 @@ def main():
 
     try:
         emacs_port = int(sys.argv[1])
-        planner.emacs_client = EPCClient(('localhost', emacs_port))
+        tools.emacs_client = EPCClient(('localhost', emacs_port))
         print(f"Connected to Emacs EPC server on port {emacs_port}", file=sys.stderr, flush=True)
     except (ValueError, ConnectionRefusedError) as e:
         print(f"ERROR: Could not connect to Emacs EPC server on port {sys.argv[1]}: {e}", file=sys.stderr, flush=True)
@@ -79,7 +79,7 @@ def main():
     # Finalize setup by telling Emacs the port of this server.
     try:
         python_epc_port = server.server_address[1]
-        planner.emacs_client.call_sync('emigo--first-start', [python_epc_port])
+        tools.emacs_client.call_sync('emigo--first-start', [python_epc_port])
         print(f"Sent emigo--first-start signal for port {python_epc_port}", file=sys.stderr, flush=True)
     except Exception as e:
         print(f"WARNING: Failed sending emigo--first-start signal to Elisp: {e}", file=sys.stderr, flush=True)
