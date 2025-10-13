@@ -1,4 +1,4 @@
-;;; epcs.el --- EPC Server              -*- lexical-binding: t -*-
+;;; epcs.el --- EPC Server              -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2011,2012,2013  Masashi Sakurai
 
@@ -28,7 +28,7 @@
 (require 'subr-x)
 
 ;; deferred
-(cl-defmacro emigo-deferred-chain (&rest elements)
+(defmacro emigo-deferred-chain (&rest elements)
   "Anaphoric function chain macro for deferred chains."
   (declare (debug (&rest form))
            (indent 0))
@@ -60,7 +60,7 @@ value in the `condition-case' form in deferred
 implementations. Then, Emacs debugger can catch an error occurred
 in the asynchronous tasks.")
 
-(cl-defmacro emigo-deferred-condition-case (var protected-form &rest handlers)
+(defmacro emigo-deferred-condition-case (var protected-form &rest handlers)
   "[internal] Custom condition-case. See the comment for
 `emigo-deferred-debug-on-signal'."
   (declare (debug condition-case)
@@ -166,35 +166,35 @@ an argument value for execution of the deferred task."
     (cond
      (callback
       (emigo-deferred-condition-case err
-                                     (let ((value (funcall callback arg)))
-                                       (cond
-                                        ((emigo-deferred-object-p value)
-                                         (emigo-deferred-log "WAIT NEST : %s" value)
-                                         (if next-deferred
-                                             (emigo-deferred-set-next value next-deferred)
-                                           value))
-                                        (t
-                                         (if next-deferred
-                                             (emigo-deferred-post-task next-deferred 'ok value)
-                                           (setf (emigo-deferred-object-status d) 'ok)
-                                           (setf (emigo-deferred-object-value d) value)
-                                           value))))
-                                     (error
-                                      (cond
-                                       (next-deferred
-                                        (emigo-deferred-post-task next-deferred 'ng err))
-                                       (t
-                                        (emigo-deferred-log "ERROR : %S" err)
-                                        (message "deferred error : %S" err)
-                                        (setf (emigo-deferred-object-status d) 'ng)
-                                        (setf (emigo-deferred-object-value d) err)
-                                        err)))))
-     (t                                 ; <= (null callback)
+        (let ((value (funcall callback arg)))
+          (cond
+           ((emigo-deferred-object-p value)
+            (emigo-deferred-log "WAIT NEST : %s" value)
+            (if next-deferred
+                (emigo-deferred-set-next value next-deferred)
+              value))
+           (t
+            (if next-deferred
+                (emigo-deferred-post-task next-deferred 'ok value)
+              (setf (emigo-deferred-object-status d) 'ok)
+              (setf (emigo-deferred-object-value d) value)
+              value))))
+        (error
+         (cond
+          (next-deferred
+           (emigo-deferred-post-task next-deferred 'ng err))
+          (t
+           (emigo-deferred-log "ERROR : %S" err)
+           (message "deferred error : %S" err)
+           (setf (emigo-deferred-object-status d) 'ng)
+           (setf (emigo-deferred-object-value d) err)
+           err)))))
+     (t ; <= (null callback)
       (cond
        (next-deferred
         (emigo-deferred-exec-task next-deferred which arg))
        ((eq which 'ok) arg)
-       (t                               ; (eq which 'ng)
+       (t                             ; (eq which 'ng)
         (emigo-deferred-resignal arg)))))))
 
 (defun emigo-deferred-set-next (prev next)
@@ -470,12 +470,6 @@ docstring  : docstring (one string) ex: \"A test function. Return sum of A,B,C a
 those objects currently connect to the epc peer.
 This variable is for debug purpose.")
 
-(defun emigo-epc-server-process-name (uid)
-  (format "emigo-epc-server:%s" uid))
-
-(defun emigo-epc-server-buffer-name (uid)
-  (format " *%s*" (emigo-epc-server-process-name uid)))
-
 (defun emigo-epc-stop-epc (mngr)
   "Disconnect the connection for the server."
   (let* ((proc (emigo-epc-manager-server-process mngr))
@@ -565,13 +559,11 @@ This variable is for debug purpose.")
               (cond
                ((emigo-deferred-object-p ret)
                 (emigo-deferred-nextc ret
-                                      (lambda (xx) (emigo-epc-manager-send mngr 'return uid xx))))
+                  (lambda (xx) (emigo-epc-manager-send mngr 'return uid xx))))
                (t (emigo-epc-manager-send mngr 'return uid ret))))
           (error
-           ;; Include method name and args in error for debugging
-           (let ((err-msg (format "FAILED in %s: %S with ERROR: %S" name args err)))
-             (emigo-epc-log err-msg)
-             (emigo-epc-manager-send mngr 'return-error uid err-msg)))))))))
+           (emigo-epc-log "ERROR : %S" err)
+           (emigo-epc-manager-send mngr 'return-error uid err))))))))
 
 (defun emigo-epc-manager-remove-session (mngr uid)
   "[internal] Remove a session from the epc manager object."
@@ -590,23 +582,19 @@ This variable is for debug purpose.")
       (emigo-epc-log "RET: id:%s [%S]" uid args)
       (emigo-epc-manager-remove-session mngr uid)
       (emigo-deferred-callback (cdr pair) args))
-     (t                                 ; error
+     (t ; error
       (emigo-epc-log "RET: NOT FOUND: id:%s [%S]" uid args)))))
 
 (defun emigo-epc-handler-return-error (mngr uid args)
   "[internal] low-level message handler for application errors."
-  (let ((pair (assq uid (emigo-epc-manager-sessions mngr)))
+  (let ((pair (assq uid (emigo-epc-manager-sessions mngr))))
     (cond
      (pair
       (emigo-epc-log "RET-ERR: id:%s [%S]" uid args)
       (emigo-epc-manager-remove-session mngr uid)
-      (let* ((err-str (format "%S" args))
-        ;; Add context about the failed call if available
-        (when (and (listp args) (eq (car args) 'error))
-          (setq err-str (format "EPC call failed: %S" args)))
-        (emigo-deferred-errorback (cdr pair) err-str))))
-     (t                                 ; error
-      (emigo-epc-log "RET-ERR: NOT FOUND: id:%s [%S]" uid args))))))
+      (emigo-deferred-errorback (cdr pair) (format "%S" args)))
+     (t ; error
+      (emigo-epc-log "RET-ERR: NOT FOUND: id:%s [%S]" uid args)))))
 
 (defun emigo-epc-handler-epc-error (mngr uid args)
   "[internal] low-level message handler for epc errors."
@@ -616,7 +604,7 @@ This variable is for debug purpose.")
       (emigo-epc-log "RET-EPC-ERR: id:%s [%S]" uid args)
       (emigo-epc-manager-remove-session mngr uid)
       (emigo-deferred-errorback (cdr pair) (list 'epc-error args)))
-     (t                                 ; error
+     (t ; error
       (emigo-epc-log "RET-EPC-ERR: NOT FOUND: id:%s [%S]" uid args)))))
 
 (defun emigo-epc-call-deferred (mngr method-name args)
@@ -644,11 +632,11 @@ object which is called with the result."
 If an exception is occurred, this function throws the error."
   (let ((result 'emigo-epc-nothing))
     (emigo-deferred-chain
-     d
-     (emigo-deferred-nextc it
-                           (lambda (x) (setq result x)))
-     (emigo-deferred-error it
-                           (lambda (er) (setq result (cons 'error er)))))
+      d
+      (emigo-deferred-nextc it
+        (lambda (x) (setq result x)))
+      (emigo-deferred-error it
+        (lambda (er) (setq result (cons 'error er)))))
     (while (eq result 'emigo-epc-nothing)
       (save-current-buffer
         (accept-process-output
