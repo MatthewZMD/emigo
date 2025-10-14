@@ -3,6 +3,7 @@
 (require 'emigo-epc)
 (require 'json)
 (require 'emigo-tools)
+(require 'subr-x)
 
 (declare-function emigo-get-buffer-name "emigo")
 (declare-function emigo-lock-region "emigo")
@@ -68,8 +69,12 @@ ROLE indicates the type of content (e.g., 'user', 'llm', 'error')."
               (insert (propertize content 'face font-lock-keyword-face)))
 
              ((equal role "llm")
+              ;; If we are at the beginning of a line, it means this is the start of a new
+              ;; response block from the LLM. Trim any leading whitespace from the first chunk.
+              (when (and (bolp) content)
+                (setq content (string-trim-left content)))
               (setq-local emigo--llm-output (concat (or emigo--llm-output "") content))
-              ;; Remove leading whitespace from newlines to fix LLM formatting quirks.
+              ;; Remove leading whitespace from subsequent newlines to fix LLM formatting quirks.
               (insert (replace-regexp-in-string "\n[ \t]+" "\n" content)))
 
              ((equal role "error") ;; Handle error messages
@@ -112,13 +117,17 @@ ROLE indicates the type of content (e.g., 'user', 'llm', 'error')."
   (emigo-epc-define-method manager 'emigo--get-emacs-vars-func #'emigo--get-emacs-vars-func "Get values of multiple Emacs variables.")
 
   ;; Symbol/State Reading
-  (emigo-epc-define-method manager 'emigo-apropos #'emigo-apropos "Search for symbols matching REGEXP.")
+  (emigo-epc-define-method manager 'emigo-apropos-command #'emigo-apropos-command "Search for commands matching REGEXP.")
+  (emigo-epc-define-method manager 'emigo-apropos-function #'emigo-apropos-function "Search for functions matching REGEXP.")
+  (emigo-epc-define-method manager 'emigo-apropos-variable #'emigo-apropos-variable "Search for variables matching REGEXP.")
   (emigo-epc-define-method manager 'emigo-symbol-doc (lambda (s) (when-let ((sym (intern-soft s))) (documentation sym))) "Return the full docstring for a SYMBOL name.")
   (emigo-epc-define-method manager 'emigo-keybindings (lambda (s) (when-let ((sym (intern-soft s))) (let ((raw-keys (where-is-internal sym nil nil t))) (mapcar #'key-description raw-keys)))) "Return a list of keybindings for a SYMBOL name.")
   (emigo-epc-define-method manager 'emigo-list-buffers #'emigo-list-buffers "Return a list of buffer names.")
   (emigo-epc-define-method manager 'emigo-buffer-metadata #'emigo-buffer-metadata "Return metadata for a buffer.")
-  (emigo-epc-define-method manager 'emigo-current-mode #'emigo-current-mode "Return the current major mode.")
   (emigo-epc-define-method manager 'emigo-eval-elisp (lambda (s) (with-temp-buffer (prin1 (eval (read s)) (current-buffer)) (buffer-string))) "Evaluate an elisp string and return result.")
+  (emigo-epc-define-method manager 'emigo-symbol-source #'emigo-symbol-source "Return source code for a symbol.")
+  (emigo-epc-define-method manager 'emigo-symbol-value #'emigo-symbol-value "Return value of a symbol.")
+  (emigo-epc-define-method manager 'emigo-visible-buffers-content #'emigo-visible-buffers-content "Return visible content of buffers.")
 
   ;; Register UI methods now that they are part of this file.
   (emigo--register-ui-rpc-methods manager)
@@ -137,7 +146,8 @@ Return the port number."
 (defun emigo--rpc-process-filter (proc string)
   "Filter for the agent process output."
   (with-current-buffer (process-buffer proc)
-    (insert string)))
+    (let ((inhibit-read-only t))
+      (insert string))))
 
 (defun emigo--rpc-process-sentinel (proc msg)
   "Sentinel for the agent process."
@@ -160,6 +170,8 @@ Return the port number."
                          "python3"
                          "-m" "python.server"
                          (number-to-string emacs-server-port)))
+    (with-current-buffer proc-buffer
+      (setq buffer-read-only t))
     (set-process-filter emigo--process #'emigo--rpc-process-filter)
     (set-process-sentinel emigo--process #'emigo--rpc-process-sentinel)))
 

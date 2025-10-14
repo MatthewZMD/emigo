@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional, Callable
 from .llm import llm_client
 from .history import _HistoryItem, summarize_history_if_needed, get_total_tokens
 from . import tools
+from .tools import LLM_TOOLS, TOOLS_REQUIRING_APPROVAL
 
 try:
     import litellm
@@ -15,23 +16,6 @@ except ImportError:
 
 # --- Tool and Method Registries ---
 
-# A set of tool names that require user approval before execution.
-# By default, most tools are safe. Potentially destructive or sensitive
-# tools like `eval_elisp` should be added here.
-TOOLS_REQUIRING_APPROVAL = set()
-
-
-# Tools available to the LLM planner.
-LLM_TOOLS: Dict[str, Callable[..., Any]] = {
-    "apropos": tools.apropos,
-    "read_doc": tools.read_doc,
-    "find_keybindings": tools.find_keybindings,
-    "list_buffers": tools.list_buffers,
-    "buffer_metadata": tools.buffer_metadata,
-    "current_mode": tools.current_mode,
-    "eval_elisp": tools.eval_elisp,
-}
-
 # The registry of all functions callable via RPC from Emacs.
 # This will be populated after all functions are defined.
 RPC_METHODS: Dict[str, Callable[..., Any]] = {**LLM_TOOLS}
@@ -40,19 +24,54 @@ RPC_METHODS['select_target'] = tools.select_target
 
 # --- Planner and Session Management ---
 
-SYSTEM_PROMPT = """You are Emigo, an expert software developer integrated into Emacs.
-You are an Emacs-native agent. Your primary goal is to help users with software development tasks inside Emacs.
-You can interact with the user's Emacs environment by calling provided tools.
-You can search for symbols using apropos, read documentation, and understand the user's current context within Emacs.
+SYSTEM_PROMPT_TEMPLATE = """You are Emigo, an expert software developer and Emacs Lisp programmer integrated into Emacs.
+Your primary goal is to help users by investigating their environment and writing Emacs Lisp code to accomplish their goals.
 
-Your workflow is:
-1.  **Perceive**: Understand the user's goal and the current state of their Emacs environment.
-2.  **Plan**: Formulate a sequence of tool calls to achieve the goal. You can also ask clarifying questions or provide code snippets for the user to execute.
-3.  **Execute**: The host environment will execute your tool calls. You will observe the results and continue planning until the goal is met.
+You have the following tools available to you:
+{tools_string}
 
-You must only use the tools provided to you. Do not ask for confirmation unless the task is ambiguous.
-If you need to write or modify code, provide the complete code snippet in a markdown block for the user to copy and paste.
+You MUST follow this workflow:
+1.  **Explore**: The user's request is likely about their current Emacs context. Your first step is ALWAYS to inspect their environment. Use `get_visible_buffers_content` to see what they are looking at. Use `apropos_command`, `apropos_function`, and `apropos_variable` with creative regular expressions to find relevant symbols.
+2.  **Gather Information**: Once you have identified candidate symbols, you MUST investigate them further. Use `read_doc` to understand their purpose, and `get_symbol_source` to understand their implementation and learn idiomatic Elisp. Use `get_symbol_value` to check the state of variables.
+3.  **Plan**: Based on your investigation, formulate a plan to write a single piece of Emacs Lisp code that solves the user's problem. Before using one or more tools, you MUST first provide a textual explanation of your reasoning and what you plan to do.
+4.  **Execute**: Provide the final code to the user.
+
+**CRITICAL RULE**: When you provide Emacs Lisp code, it MUST be a single, self-contained, and syntactically valid s-expression. Do not wrap it in markdown code blocks unless it is part of a larger explanation. If you are just providing code, provide only the raw s-expression.
 """
+
+def get_tools_prompt_string() -> str:
+    """Generates a formatted string describing available tools for the system prompt."""
+    tool_descriptions = []
+    for name, func in LLM_TOOLS.items():
+        try:
+            sig = inspect.signature(func)
+            doc = inspect.getdoc(func) or "No description."
+
+            param_parts = []
+            for param_name, param in sig.parameters.items():
+                param_type = "string"  # Default
+                if param.annotation in [int, float]:
+                    param_type = "number"
+                elif param.annotation == bool:
+                    param_type = "boolean"
+                elif param.annotation in [list, List]:
+                    param_type = "array"
+                elif param.annotation in [dict, Dict, Any]:
+                    param_type = "object"
+
+                default_val = ""
+                if param.default is not inspect.Parameter.empty:
+                    default_val = f" (default: {param.default})"
+
+                param_parts.append(f"{param_name}: {param_type}{default_val}")
+
+            params_str = ", ".join(param_parts)
+            tool_descriptions.append(f"- `{name}({params_str})`: {doc}")
+        except (ValueError, TypeError) as e:
+            print(f"Could not generate description for tool '{name}': {e}", file=sys.stderr)
+
+    return "\n".join(tool_descriptions)
+
 
 def get_available_tools_schema() -> List[Dict[str, Any]]:
     """
@@ -107,7 +126,9 @@ class PlannerAgent:
     """Manages the state and execution loop for a single Emigo session."""
     def __init__(self, session_path: str):
         self.session_path = session_path
-        self.history: List[_HistoryItem] = [_HistoryItem(message={"role": "system", "content": SYSTEM_PROMPT})]
+        tools_string = get_tools_prompt_string()
+        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(tools_string=tools_string)
+        self.history: List[_HistoryItem] = [_HistoryItem(message={"role": "system", "content": system_prompt})]
         self._configure_llm()
 
     def _configure_llm(self):
@@ -129,7 +150,9 @@ class PlannerAgent:
 
     def clear_history(self):
         """Resets the conversation history."""
-        self.history = [_HistoryItem(message={"role": "system", "content": SYSTEM_PROMPT})]
+        tools_string = get_tools_prompt_string()
+        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(tools_string=tools_string)
+        self.history = [_HistoryItem(message={"role": "system", "content": system_prompt})]
         print(f"History cleared for session: {self.session_path}", file=sys.stderr)
 
     def get_history(self) -> List[Dict[str, Any]]:

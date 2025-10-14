@@ -9,7 +9,7 @@
 ;; Copyright (C) 2025, Emigo, all rights reserved.
 ;; Created: 2025-03-29
 ;; Version: 0.5
-;; Last-Updated: Wed Oct  8 11:43:33 2025 (+0800)
+;; Last-Updated: Tue Oct 14 21:00:54 2025 (+0700)
 ;;           By: Mingde (Matthew) Zeng
 ;; Package-Requires: ((emacs "26.1") (transient "0.3.0") (compat "30.0.2.0") (markdown-mode "2.6"))
 ;; Keywords: ai emacs llm aider ai-pair-programming tools
@@ -212,6 +212,10 @@ Then Emigo will start by gdb, please send new issue with `emigo-name' buffer con
   (interactive)
   (when (and emigo--process (process-live-p emigo--process))
     (kill-process emigo--process))
+  (when-let ((proc-buf (get-buffer "*Emigo Process*")))
+    (with-current-buffer proc-buf
+      (let ((inhibit-read-only t))
+        (erase-buffer))))
   (setq emigo--process nil)
   (setq emigo--connection nil)
   (emigo-rpc-connect)
