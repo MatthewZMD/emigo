@@ -24,54 +24,23 @@ RPC_METHODS['select_target'] = tools.select_target
 
 # --- Planner and Session Management ---
 
-SYSTEM_PROMPT_TEMPLATE = """You are Emigo, an expert software developer and Emacs Lisp programmer integrated into Emacs.
+SYSTEM_PROMPT_TEMPLATE = """You are Emigo, an expert software developer and Emacs Lisp programmer, acting as an interactive pair programmer integrated into Emacs.
 Your primary goal is to help users by investigating their environment and writing Emacs Lisp code to accomplish their goals.
 
-You have the following tools available to you:
-{tools_string}
+To be effective, you have a few knowhows for exploring the user's Emacs environment:
+- You can inspect what the user is looking at with `get_visible_buffers_content`.
+- You can find relevant symbols (commands, functions, variables) using `apropos_command`, `apropos_function`, and `apropos_variable`. These tools take Emacs Lisp regular expressions, which have a different syntax than PCRE (e.g., `\\(` and `\\)` for grouping, `\\|` for alternation). Vague queries will be rejected, so be creative and specific.
+- Once you find symbols, you can investigate them with `read_doc`, `get_symbol_source`, and `get_symbol_value` to understand their purpose, implementation, and state.
 
-You MUST follow this workflow:
-1.  **Explore**: The user's request is likely about their current Emacs context. Your first step is ALWAYS to inspect their environment. Use `get_visible_buffers_content` to see what they are looking at. Use `apropos_command`, `apropos_function`, and `apropos_variable` with creative regular expressions to find relevant symbols.
-2.  **Gather Information**: Once you have identified candidate symbols, you MUST investigate them further. Use `read_doc` to understand their purpose, and `get_symbol_source` to understand their implementation and learn idiomatic Elisp. Use `get_symbol_value` to check the state of variables.
-3.  **Plan**: Based on your investigation, formulate a plan to write a single piece of Emacs Lisp code that solves the user's problem. Before using one or more tools, you MUST first provide a textual explanation of your reasoning and what you plan to do.
-4.  **Execute**: Provide the final code to the user.
+If the user's request requires writing Emacs Lisp code, you should follow this routine:
+1.  **Explore & Gather Information**: Use your exploratory knowhows to understand the user's context and find relevant Emacs Lisp symbols.
+2.  **Plan**: Based on your investigation, formulate a plan to write a single piece of Emacs Lisp code that solves the user's problem. Before using one or more tools, you MUST first provide a textual explanation of your reasoning and what you plan to do.
+3.  **Execute**: Provide the final code to the user. This is a two-step process:
+    a. **Propose**: You MUST first call the `propose_elisp` tool with your generated code. Provide a concise summary of the user's goal for the `intent` parameter. This tool will validate and finalize the code.
+    b. **Evaluate**: ONLY after `propose_elisp` succeeds, you may use `eval_elisp` with the validated code returned by `propose_elisp`.
 
 **CRITICAL RULE**: When you provide Emacs Lisp code, it MUST be a single, self-contained, and syntactically valid s-expression. Do not wrap it in markdown code blocks unless it is part of a larger explanation. If you are just providing code, provide only the raw s-expression.
 """
-
-def get_tools_prompt_string() -> str:
-    """Generates a formatted string describing available tools for the system prompt."""
-    tool_descriptions = []
-    for name, func in LLM_TOOLS.items():
-        try:
-            sig = inspect.signature(func)
-            doc = inspect.getdoc(func) or "No description."
-
-            param_parts = []
-            for param_name, param in sig.parameters.items():
-                param_type = "string"  # Default
-                if param.annotation in [int, float]:
-                    param_type = "number"
-                elif param.annotation == bool:
-                    param_type = "boolean"
-                elif param.annotation in [list, List]:
-                    param_type = "array"
-                elif param.annotation in [dict, Dict, Any]:
-                    param_type = "object"
-
-                default_val = ""
-                if param.default is not inspect.Parameter.empty:
-                    default_val = f" (default: {param.default})"
-
-                param_parts.append(f"{param_name}: {param_type}{default_val}")
-
-            params_str = ", ".join(param_parts)
-            tool_descriptions.append(f"- `{name}({params_str})`: {doc}")
-        except (ValueError, TypeError) as e:
-            print(f"Could not generate description for tool '{name}': {e}", file=sys.stderr)
-
-    return "\n".join(tool_descriptions)
-
 
 def get_available_tools_schema() -> List[Dict[str, Any]]:
     """
@@ -126,9 +95,7 @@ class PlannerAgent:
     """Manages the state and execution loop for a single Emigo session."""
     def __init__(self, session_path: str):
         self.session_path = session_path
-        tools_string = get_tools_prompt_string()
-        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(tools_string=tools_string)
-        self.history: List[_HistoryItem] = [_HistoryItem(message={"role": "system", "content": system_prompt})]
+        self.history: List[_HistoryItem] = [_HistoryItem(message={"role": "system", "content": SYSTEM_PROMPT_TEMPLATE})]
         self._configure_llm()
 
     def _configure_llm(self):
@@ -150,9 +117,7 @@ class PlannerAgent:
 
     def clear_history(self):
         """Resets the conversation history."""
-        tools_string = get_tools_prompt_string()
-        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(tools_string=tools_string)
-        self.history = [_HistoryItem(message={"role": "system", "content": system_prompt})]
+        self.history = [_HistoryItem(message={"role": "system", "content": SYSTEM_PROMPT_TEMPLATE})]
         print(f"History cleared for session: {self.session_path}", file=sys.stderr)
 
     def get_history(self) -> List[Dict[str, Any]]:
@@ -185,25 +150,35 @@ class PlannerAgent:
             tool_call_chunks = {}
             stop_reason = "unknown"
 
-            for chunk in response_stream:
-                choice = chunk.choices[0]
-                delta = choice.delta
-                stop_reason = choice.finish_reason or stop_reason
+            try:
+                for chunk in response_stream:
+                    choice = chunk.choices[0]
+                    delta = choice.delta
+                    stop_reason = choice.finish_reason or stop_reason
 
-                if delta.content:
-                    llm_content += delta.content
-                    tools.emacs_client.call_sync('emigo--flush-buffer', [self.session_path, delta.content, "llm"])
+                    if delta.content:
+                        llm_content += delta.content
+                        tools.emacs_client.call_sync('emigo--flush-buffer', [self.session_path, delta.content, "llm"])
 
-                if delta.tool_calls:
-                    for tool_call_chunk in delta.tool_calls:
-                        index = tool_call_chunk.index
-                        if index not in tool_call_chunks:
-                            tool_call_chunks[index] = {"id": None, "type": "function", "function": {"name": "", "arguments": ""}}
+                    if delta.tool_calls:
+                        for tool_call_chunk in delta.tool_calls:
+                            index = tool_call_chunk.index
+                            if index not in tool_call_chunks:
+                                tool_call_chunks[index] = {"id": None, "type": "function", "function": {"name": "", "arguments": ""}}
 
-                        chunk_dict = tool_call_chunks[index]
-                        if tool_call_chunk.id: chunk_dict["id"] = tool_call_chunk.id
-                        if tool_call_chunk.function.name: chunk_dict["function"]["name"] = tool_call_chunk.function.name
-                        if tool_call_chunk.function.arguments: chunk_dict["function"]["arguments"] += tool_call_chunk.function.arguments
+                            chunk_dict = tool_call_chunks[index]
+                            if tool_call_chunk.id: chunk_dict["id"] = tool_call_chunk.id
+                            if tool_call_chunk.function.name: chunk_dict["function"]["name"] = tool_call_chunk.function.name
+                            if tool_call_chunk.function.arguments: chunk_dict["function"]["arguments"] += tool_call_chunk.function.arguments
+            except litellm.exceptions.APIConnectionError as e:
+                # Workaround for a litellm/provider bug where a tool call chunk is malformed.
+                if "missing 1 required positional argument: 'arguments'" in str(e):
+                    print(f"WORKAROUND: Ignoring litellm stream parsing error: {e}", file=sys.stderr)
+                    # If we were receiving tool calls, assume that was the intended action.
+                    if tool_call_chunks:
+                        stop_reason = "tool_calls"
+                else:
+                    raise
 
             # Get usage after stream is consumed
             llm_usage = getattr(response_stream, 'usage', None)
@@ -246,6 +221,31 @@ class PlannerAgent:
                             if not tool_func:
                                 raise NameError(f"Tool '{tool_name}' not found.")
 
+                            # Guard against LLM returning a raw value for a single-arg function
+                            if not isinstance(tool_params, dict):
+                                sig = inspect.signature(tool_func)
+                                if len(sig.parameters) == 1:
+                                    param_name = next(iter(sig.parameters))
+                                    tool_params = {param_name: tool_params}
+
+                            # Guard against LLM nesting JSON in string arguments
+                            if isinstance(tool_params, dict):
+                                for param_name, param_value in tool_params.items():
+                                    if isinstance(param_value, str):
+                                        try:
+                                            nested_data = json.loads(param_value)
+                                            if isinstance(nested_data, dict) and param_name in nested_data:
+                                                tool_params[param_name] = nested_data[param_name]
+                                        except json.JSONDecodeError:
+                                            pass  # Not a JSON string, leave as is.
+
+                            # Validate that all required arguments are present
+                            sig = inspect.signature(tool_func)
+                            required_params = [p.name for p in sig.parameters.values() if p.default is inspect.Parameter.empty]
+                            missing_params = [p for p in required_params if p not in tool_params]
+                            if missing_params:
+                                raise TypeError(f"missing required arguments: {', '.join(missing_params)}")
+
                             print(f"Executing tool: {tool_name}({tool_params})", file=sys.stderr)
                             result = tool_func(**tool_params)
                             result_content = json.dumps(result)
@@ -253,7 +253,7 @@ class PlannerAgent:
                             tool_results.append({"tool_call_id": tool_id, "role": "tool", "name": tool_name, "content": result_content})
 
                         except (Exception, TypeError) as e:
-                            print(f"Error executing tool '{tool_name}': {e}", file=sys.stderr)
+                            print(f"Error executing tool: {tool_name} with args ({tool_call['function']['arguments']}): {e}", file=sys.stderr)
                             error_content = json.dumps({"error": str(e)})
                             print(f"--- TOOL ERROR (ID: {tool_id}) ---\n{error_content}", file=sys.stderr)
                             tool_results.append({"tool_call_id": tool_id, "role": "tool", "name": tool_name, "content": error_content})

@@ -125,6 +125,7 @@ ROLE indicates the type of content (e.g., 'user', 'llm', 'error')."
   (emigo-epc-define-method manager 'emigo-list-buffers #'emigo-list-buffers "Return a list of buffer names.")
   (emigo-epc-define-method manager 'emigo-buffer-metadata #'emigo-buffer-metadata "Return metadata for a buffer.")
   (emigo-epc-define-method manager 'emigo-eval-elisp (lambda (s) (with-temp-buffer (prin1 (eval (read s)) (current-buffer)) (buffer-string))) "Evaluate an elisp string and return result.")
+  (emigo-epc-define-method manager 'emigo-validate-elisp #'emigo-validate-elisp "Validate elisp syntax and symbols.")
   (emigo-epc-define-method manager 'emigo-symbol-source #'emigo-symbol-source "Return source code for a symbol.")
   (emigo-epc-define-method manager 'emigo-symbol-value #'emigo-symbol-value "Return value of a symbol.")
   (emigo-epc-define-method manager 'emigo-visible-buffers-content #'emigo-visible-buffers-content "Return visible content of buffers.")
@@ -147,6 +148,7 @@ Return the port number."
   "Filter for the agent process output."
   (with-current-buffer (process-buffer proc)
     (let ((inhibit-read-only t))
+      (goto-char (point-max))
       (insert string))))
 
 (defun emigo--rpc-process-sentinel (proc msg)
@@ -184,7 +186,7 @@ Return the port number."
                     (method . ,method)
                     (params . ,(apply #'list params))))
          ;; The remote method `handle_request` takes one argument, the JSON string.
-         (response (emigo-epc-call-sync emigo--connection 'handle_request (json-serialize request))))
+         (response (emigo-epc-call-sync emigo--connection 'handle_request (json-encode request))))
     ;; The response is a plist converted from the Python dictionary by EPC.
     (if (plist-get response :ok)
         (plist-get response :result)
@@ -196,7 +198,7 @@ Return the port number."
 (defun emigo-rpc-notify (method &rest params)
   "Send an asynchronous RPC notification to the Python agent."
   (when emigo--connection
-    (let* ((request-json (json-serialize
+    (let* ((request-json (json-encode
                           `(:id ,(emigo-epc-uid)
                             :type "call"
                             :method ,method

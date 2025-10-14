@@ -72,20 +72,6 @@
   :type '(choice (const attach-if-present) (const spawn-if-missing))
   :group 'emigo)
 
-;;;###autoload
-(defun emigo-start-process ()
-  "Start or attach to an Emacs server and launch the Emigo agent."
-  (interactive)
-  (pcase emigo-server-policy
-    ('attach-if-present
-     (unless (server-running-p)
-       (user-error "Emacs server is not running and emigo-server-policy is 'attach-if-present")))
-    ('spawn-if-missing
-     (unless (server-running-p)
-       (server-start))))
-
-  (emigo-rpc-connect)
-  (message "Emigo session started. Python agent process is starting..."))
 
 ;;;###autoload
 (defun emigo-instruct (goal)
@@ -207,18 +193,39 @@ Then Emigo will start by gdb, please send new issue with `emigo-name' buffer con
     (error "[Emigo] Could not determine session path"))
   session-path)
 
-(defun emigo-restart-process ()
-  "Stop and restart Emigo process."
+(defun emigo-kill-process ()
+  "Stop the Emigo process and clear its buffer."
   (interactive)
   (when (and emigo--process (process-live-p emigo--process))
-    (kill-process emigo--process))
+    (kill-process emigo--process)
+    (message "[Emigo] Process killed."))
   (when-let ((proc-buf (get-buffer "*Emigo Process*")))
     (with-current-buffer proc-buf
       (let ((inhibit-read-only t))
         (erase-buffer))))
   (setq emigo--process nil)
-  (setq emigo--connection nil)
+  (setq emigo--connection nil))
+
+;;;###autoload
+(defun emigo-start-process ()
+  "Start or attach to an Emacs server and launch the Emigo agent."
+  (interactive)
+  (pcase emigo-server-policy
+    ('attach-if-present
+     (unless (server-running-p)
+       (user-error "Emacs server is not running and emigo-server-policy is 'attach-if-present")))
+    ('spawn-if-missing
+     (unless (server-running-p)
+       (server-start))))
+
   (emigo-rpc-connect)
+  (message "Emigo session started. Python agent process is starting..."))
+
+(defun emigo-restart-process ()
+  "Stop and restart Emigo process."
+  (interactive)
+  (emigo-kill-process)
+  (emigo-start-process)
   (message "[Emigo] Process restarted."))
 
 (defun emigo-enable ()

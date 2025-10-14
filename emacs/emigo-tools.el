@@ -6,7 +6,8 @@
     (mapatoms (lambda (s)
                 (when (and (funcall pred s)
                            (or (string-match-p regexp (symbol-name s))
-                               (and (documentation s) (string-match-p regexp (documentation s)))))
+                               (let ((doc (ignore-errors (documentation s))))
+                                 (and doc (string-match-p regexp doc)))))
                   (push s res))))
     (nreverse res)))
 
@@ -22,7 +23,7 @@
                     ((custom-variable-p s) "variable")
                     ((boundp s) "variable")
                     (t "symbol")))
-             (doc (documentation s))
+             (doc (ignore-errors (documentation s)))
              (doc-excerpt (when doc (substring doc 0 (min 200 (length doc))))))
         (push `(:symbol ,(symbol-name s)
                 :kind ,kind
@@ -61,7 +62,7 @@
   "Return the documentation for SYMBOL-NAME."
   (let ((symbol (intern-soft symbol-name)))
     (when symbol
-      (documentation symbol))))
+      (ignore-errors (documentation symbol)))))
 
 (defun emigo-keybindings (symbol-name)
   "Return a list of keybindings for the command SYMBOL-NAME."
@@ -76,12 +77,13 @@
 (defun emigo-symbol-source (symbol-name)
   "Return the source code for SYMBOL-NAME."
   (let ((symbol (intern-soft symbol-name)))
-    (when (and symbol (fboundp symbol))
+    (when symbol
       (save-excursion
-        (let ((buffer (find-function-get-buffer symbol)))
+        (let ((buffer (cond
+                       ((fboundp symbol) (find-function-noselect symbol))
+                       ((boundp symbol) (find-variable-noselect symbol)))))
           (when buffer
             (with-current-buffer buffer
-              (goto-char (find-function-search-for-symbol symbol))
               (let ((start (point)))
                 (forward-sexp)
                 (buffer-substring-no-properties start (point))))))))))
@@ -108,6 +110,43 @@ Excludes Emigo buffers and the minibuffer."
                     :content ,content)
                   results)))))
     (nreverse results)))
+
+(defun emigo--walk-elisp-form (form collector)
+  "Walk FORM and apply COLLECTOR to each symbol."
+  (cond
+   ((symbolp form) (funcall collector form))
+   ((consp form)
+    (emigo--walk-elisp-form (car form) collector)
+    (when (cdr form)
+      (emigo--walk-elisp-form (cdr form) collector)))
+   (t nil)))
+
+(defun emigo-validate-elisp (code)
+  "Validate the syntax and symbols of an elisp CODE string.
+Returns a plist with validation results."
+  (let (form err symbols-info)
+    (condition-case e
+        (setq form (read-from-string code))
+      (error (setq err (format "Syntax error: %s" (cadr e)))))
+    (if err
+        `(:syntax_valid nil :error ,err)
+      (let ((symbols ()))
+        (emigo--walk-elisp-form form (lambda (s) (push s symbols)))
+        (setq symbols (delete-dups (nreverse symbols)))
+        (dolist (s symbols)
+          (let* ((s-name (symbol-name s))
+                 (status (cond
+                          ((fboundp s) "function")
+                          ((macrop s) "macro")
+                          ((commandp s) "command")
+                          ((boundp s) "variable")
+                          ((keywordp s) "keyword")
+                          ((or (eq s t) (eq s nil)) "boolean")
+                          (t "unbound")))
+                 (doc (unless (or (eq status "unbound") (eq status "keyword") (eq status "boolean"))
+                        (ignore-errors (documentation s)))))
+            (push `(:symbol ,s-name :status ,status :doc ,doc) symbols-info)))
+        `(:syntax_valid t :symbols ,(nreverse symbols-info))))))
 
 (provide 'emigo-tools)
 ;;; emigo-tools.el ends here
