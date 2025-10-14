@@ -113,8 +113,8 @@ ROLE indicates the type of content (e.g., 'user', 'llm', 'error')."
 
   ;; Symbol/State Reading
   (emigo-epc-define-method manager 'emigo-apropos #'emigo-apropos "Search for symbols matching REGEXP.")
-  (emigo-epc-define-method manager 'emacs_symbol_doc (lambda (s) (when-let ((sym (intern-soft s))) (documentation sym))) "Return the full docstring for a SYMBOL name.")
-  (emigo-epc-define-method manager 'emacs_keybindings (lambda (s) (when-let ((sym (intern-soft s))) (let ((raw-keys (where-is-internal sym nil nil t))) (mapcar #'key-description raw-keys)))) "Return a list of keybindings for a SYMBOL name.")
+  (emigo-epc-define-method manager 'emigo-symbol-doc (lambda (s) (when-let ((sym (intern-soft s))) (documentation sym))) "Return the full docstring for a SYMBOL name.")
+  (emigo-epc-define-method manager 'emigo-keybindings (lambda (s) (when-let ((sym (intern-soft s))) (let ((raw-keys (where-is-internal sym nil nil t))) (mapcar #'key-description raw-keys)))) "Return a list of keybindings for a SYMBOL name.")
   (emigo-epc-define-method manager 'emigo-list-buffers #'emigo-list-buffers "Return a list of buffer names.")
   (emigo-epc-define-method manager 'emigo-buffer-metadata #'emigo-buffer-metadata "Return metadata for a buffer.")
   (emigo-epc-define-method manager 'emigo-current-mode #'emigo-current-mode "Return the current major mode.")

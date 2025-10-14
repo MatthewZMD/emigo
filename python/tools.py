@@ -16,11 +16,11 @@ def apropos(query: str) -> List[Dict[str, Any]]:
 
 def read_doc(symbol_name: str) -> Optional[str]:
     """Read the full docstring for a symbol from Emacs."""
-    return emacs_client.call('emacs_symbol_doc', [symbol_name])
+    return emacs_client.call('emigo-symbol-doc', [symbol_name])
 
 def find_keybindings(symbol_name: str) -> List[str]:
     """Find keybindings for a given command symbol in Emacs."""
-    return emacs_client.call('emacs_keybindings', [symbol_name])
+    return emacs_client.call('emigo-keybindings', [symbol_name])
 
 def list_buffers() -> List[str]:
     """Return a list of all buffer names in Emacs."""
