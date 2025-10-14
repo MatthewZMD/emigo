@@ -15,6 +15,12 @@ except ImportError:
 
 # --- Tool and Method Registries ---
 
+# A set of tool names that require user approval before execution.
+# By default, most tools are safe. Potentially destructive or sensitive
+# tools like `eval_elisp` should be added here.
+TOOLS_REQUIRING_APPROVAL = set()
+
+
 # Tools available to the LLM planner.
 LLM_TOOLS: Dict[str, Callable[..., Any]] = {
     "apropos": tools.apropos,
@@ -194,12 +200,21 @@ class PlannerAgent:
             self.history.append(_HistoryItem(message=assistant_message, usage=usage_dict))
 
             if stop_reason == "tool_calls":
-                tool_calls_for_approval = assistant_message['tool_calls']
-                approval_response = tools.emacs_client.call_sync('emigo--approve-tool-calls', [json.dumps(tool_calls_for_approval)])
+                proposed_tool_calls = assistant_message['tool_calls']
+
+                # Check if any proposed tool call requires approval
+                needs_approval = any(
+                    tool_call["function"]["name"] in TOOLS_REQUIRING_APPROVAL
+                    for tool_call in proposed_tool_calls
+                )
+
+                approval_response = "approve"  # Default to approve
+                if needs_approval:
+                    approval_response = tools.emacs_client.call_sync('emigo--approve-tool-calls', [json.dumps(proposed_tool_calls)])
 
                 if approval_response == "approve":
                     tool_results = []
-                    for tool_call in assistant_message["tool_calls"]:
+                    for tool_call in proposed_tool_calls:
                         tool_name = tool_call["function"]["name"]
                         tool_id = tool_call["id"]
                         try:
